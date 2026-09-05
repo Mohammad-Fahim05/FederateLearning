@@ -38,11 +38,13 @@ class HospitalClient:
             gamma=config['federated']['focal_gamma']
         )
         
-        # DP Clipper
+        # DP Clipper with memory-safe chunking
+        chunk_size = config.get('privacy', {}).get('chunk_size', 8)
         self.dp_clipper = DPGradientClipper(
             max_grad_norm=config['privacy']['max_grad_norm'],
             noise_multiplier=config['privacy']['noise_multiplier'] if config['privacy']['enabled'] else 0.0,
-            enabled=config['privacy']['enabled']
+            enabled=config['privacy']['enabled'],
+            chunk_size=chunk_size
         )
         
         self.sam_rho = config['federated']['sam_rho']

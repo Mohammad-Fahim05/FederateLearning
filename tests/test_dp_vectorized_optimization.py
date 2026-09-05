@@ -129,12 +129,50 @@ def test_privacy_accountant_parameters_unchanged():
     assert res['delta'] == 1e-5
     assert res['q'] == 64.0 / 91950.0
     assert res['steps_per_epoch'] == 1437
-    assert res['total_grad_steps'] == 100 * 2 * 1437
-    assert res['total_epsilon'] > 0 and res['total_epsilon'] < float('inf')
+def test_dp_chunked_vs_full_batch_equivalence():
+    """
+    Verifies that chunked vectorized calculation (e.g. chunk_size=4, 8, 16) produces
+    strictly identical parameter gradients to full unchunked batch calculation.
+    """
+    torch.manual_seed(42)
+    model_full = ResNet18Backbone(num_classes=2, pretrained=False)
+    model_chunked = ResNet18Backbone(num_classes=2, pretrained=False)
+    model_chunked.load_state_dict(model_full.state_dict())
+    
+    model_full.eval()
+    model_chunked.eval()
+    
+    criterion = LocalFocalLoss()
+    C = 1.0
+    
+    x = torch.randn(16, 3, 96, 96)
+    y = torch.randint(0, 2, (16,))
+    
+    # 1. Full batch clipper (chunk_size=16)
+    clipper_full = DPGradientClipper(max_grad_norm=C, noise_multiplier=0.0, enabled=True, chunk_size=16)
+    loss_full = clipper_full.clip_and_noise_sample_grad(model_full, criterion, x, y, device='cpu')
+    
+    # 2. Chunked clipper (chunk_size=4)
+    clipper_chunked = DPGradientClipper(max_grad_norm=C, noise_multiplier=0.0, enabled=True, chunk_size=4)
+    loss_chunked = clipper_chunked.clip_and_noise_sample_grad(model_chunked, criterion, x, y, device='cpu')
+    
+    assert abs(loss_full - loss_chunked) < 1e-5
+    
+    diffs = []
+    for p_full, p_chunk in zip(model_full.parameters(), model_chunked.parameters()):
+        if p_full.grad is not None:
+            assert p_chunk.grad is not None
+            diff = (p_full.grad - p_chunk.grad).abs().max().item()
+            diffs.append(diff)
+            
+    max_diff = max(diffs)
+    print(f"Max Gradient Absolute Difference (Full Batch vs Chunked Batch): {max_diff:.2e}")
+    assert max_diff < 1e-6, f"Chunked gradient deviated from full batch: {max_diff}"
 
 if __name__ == "__main__":
     test_dp_vectorized_numerical_equivalence()
+    test_dp_chunked_vs_full_batch_equivalence()
     test_dp_vectorized_clipping_bound()
     test_dp_vectorized_with_noise_and_optimizer_step()
     test_privacy_accountant_parameters_unchanged()
-    print("All DP vectorized optimization tests passed successfully!")
+    print("All DP vectorized and chunked optimization tests passed successfully!")

@@ -2,20 +2,22 @@ import torch
 
 class DPGradientClipper:
     """
-    Applies mathematically rigorous, vectorized per-sample gradient clipping and Gaussian DP noise injection.
-    Ensures formal Differential Privacy guarantees for sampled Gaussian mechanism with high throughput.
+    Applies mathematically rigorous, chunked vectorized per-sample gradient clipping and Gaussian DP noise injection.
+    Computes per-sample gradients in memory-safe micro-chunks via torch.func.vmap to eliminate GPU OOM spikes
+    while maintaining exact mathematical equivalence.
     """
-    def __init__(self, max_grad_norm=1.0, noise_multiplier=0.8, enabled=True):
+    def __init__(self, max_grad_norm=1.0, noise_multiplier=0.8, enabled=True, chunk_size=8):
         self.max_grad_norm = float(max_grad_norm)
         self.noise_multiplier = float(noise_multiplier)
         self.enabled = enabled
+        self.chunk_size = int(chunk_size) if chunk_size is not None else 8
 
     def clip_and_noise_sample_grad(self, model, criterion, images, labels, device='cpu'):
         """
-        Computes vectorized per-sample gradients using torch.func / vmap,
+        Computes vectorized per-sample gradients in micro-chunks of size chunk_size using torch.func / vmap,
         clips each sample's gradient norm to C = max_grad_norm:
         g_i' = g_i * min(1, C / ||g_i||_2)
-        Averages across batch and injects Gaussian DP noise:
+        Averages across full batch B and injects Gaussian DP noise:
         \\bar{g} = (1/B) * \\sum_{i=1}^B g_i' + N(0, (sigma * C / B)^2 * I)
         """
         if not self.enabled:
@@ -40,43 +42,63 @@ class DPGradientClipper:
                 loss = loss.mean()
             return loss
 
-        # Fast vectorized per-sample gradient computation
+        # Fast vectorized per-sample gradient computation operator
         ft_grad = torch.func.grad(compute_single_loss)
         ft_vmap = torch.func.vmap(ft_grad, in_dims=(None, None, 0, 0))
+
+        # Accumulator for clipped gradients: sum_{i=1}^B g_i'
+        accum_clipped_grads = {name: torch.zeros_like(p.data) for name, p in params.items()}
+        total_loss_accum = 0.0
 
         # Model evaluation mode during per-sample functional evaluation ensures stable buffer running stats
         was_training = model.training
         model.eval()
         try:
-            sample_grads = ft_vmap(params, buffers, images, labels)
+            chunk_size = max(1, self.chunk_size)
+            for start_idx in range(0, batch_size, chunk_size):
+                end_idx = min(start_idx + chunk_size, batch_size)
+                chunk_imgs = images[start_idx:end_idx]
+                chunk_lbls = labels[start_idx:end_idx]
+                curr_chunk_size = end_idx - start_idx
+
+                # 1. Compute per-sample gradients for this chunk
+                chunk_sample_grads = ft_vmap(params, buffers, chunk_imgs, chunk_lbls)
+
+                # 2. Compute per-sample gradient L2 norms for the chunk
+                chunk_norms_sq = torch.zeros(curr_chunk_size, device=images.device)
+                for p_name, s_grad in chunk_sample_grads.items():
+                    chunk_norms_sq += s_grad.flatten(start_dim=1).pow(2).sum(dim=1)
+                chunk_norms = chunk_norms_sq.sqrt()
+
+                # 3. Per-sample scaling factor min(1, C / ||g_i||_2)
+                chunk_clip_coefs = torch.clamp(self.max_grad_norm / (chunk_norms + 1e-6), max=1.0)
+
+                # 4. Accumulate clipped gradients
+                for name, s_grad in chunk_sample_grads.items():
+                    view_shape = [curr_chunk_size] + [1] * (s_grad.dim() - 1)
+                    clipped_chunk_sg = s_grad * chunk_clip_coefs.view(*view_shape)
+                    accum_clipped_grads[name] += clipped_chunk_sg.sum(dim=0)
+
+                # 5. Track loss
+                with torch.no_grad():
+                    chunk_out = model(chunk_imgs)
+                    c_loss = criterion(chunk_out, chunk_lbls)
+                    c_val = c_loss.item() if c_loss.dim() == 0 else c_loss.mean().item()
+                    total_loss_accum += c_val * curr_chunk_size
+
+                # Explicitly clean up chunk memory immediately
+                del chunk_sample_grads, chunk_norms_sq, chunk_norms, chunk_clip_coefs
         finally:
             if was_training:
                 model.train()
 
-        # Compute per-sample gradient L2 norms across all parameters
-        sample_norms_sq = torch.zeros(batch_size, device=images.device)
-        for p_name, s_grad in sample_grads.items():
-            sample_norms_sq += s_grad.flatten(start_dim=1).pow(2).sum(dim=1)
-        sample_norms = sample_norms_sq.sqrt()
+        total_loss = total_loss_accum / batch_size
 
-        # Scaling factor min(1, C / ||g_i||_2)
-        clip_coefs = torch.clamp(self.max_grad_norm / (sample_norms + 1e-6), max=1.0)  # Shape: (B,)
-
-        # Compute average loss for tracking
-        with torch.no_grad():
-            full_out = model(images)
-            loss_val = criterion(full_out, labels)
-            total_loss = loss_val.item() if loss_val.dim() == 0 else loss_val.mean().item()
-
-        # Set parameter gradients: averaged clipped gradient + Gaussian noise
+        # Set parameter gradients: averaged clipped gradient (sum / B) + Gaussian noise
         model.zero_grad()
         for name, p in model.named_parameters():
-            if p.requires_grad and name in sample_grads:
-                sg = sample_grads[name]  # Shape: (B, *param_shape)
-                view_shape = [batch_size] + [1] * (sg.dim() - 1)
-                clipped_sg = sg * clip_coefs.view(*view_shape)
-                avg_clipped_grad = clipped_sg.mean(dim=0)
-
+            if p.requires_grad and name in accum_clipped_grads:
+                avg_clipped_grad = accum_clipped_grads[name] / batch_size
                 if self.noise_multiplier > 0:
                     std = (self.noise_multiplier * self.max_grad_norm) / batch_size
                     noise = torch.randn_like(p.data) * std
