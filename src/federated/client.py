@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
@@ -13,11 +14,22 @@ class HospitalClient:
     def __init__(self, client_id, dataset, indices, config, device='cpu'):
         self.client_id = client_id
         self.config = config
-        self.device = device
+        self.device = torch.device(device) if isinstance(device, str) else device
         
-        # Local DataLoader
+        # Local DataLoader with optimized multiprocessing and prefetching
+        num_workers = config.get('federated', {}).get('num_workers', 4 if os.name != 'nt' else 0)
+        pin_memory = (self.device.type == 'cuda' and torch.cuda.is_available())
+        persistent_workers = (num_workers > 0)
+        
         subset = Subset(dataset, indices)
-        self.loader = DataLoader(subset, batch_size=config['federated']['batch_size'], shuffle=True)
+        self.loader = DataLoader(
+            subset,
+            batch_size=config['federated']['batch_size'],
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers
+        )
         self.num_samples = len(subset)
         
         # Local Focal Loss
@@ -43,10 +55,11 @@ class HospitalClient:
         total_batches = 0
         
         for batch_idx, (images, labels, _, _) in enumerate(self.loader):
-            images, labels = images.to(self.device), labels.to(self.device)
+            images = images.to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
             optimizer.zero_grad()
             
-            # Step 1 & Step 3: Compute per-sample clipped & DP noised gradients
+            # Step 1 & Step 3: Compute vectorized per-sample clipped & DP noised gradients
             loss_val = self.dp_clipper.clip_and_noise_sample_grad(
                 model, self.criterion, images, labels, device=self.device
             )
