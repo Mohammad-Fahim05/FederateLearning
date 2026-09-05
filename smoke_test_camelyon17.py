@@ -7,11 +7,25 @@ import yaml
 import torch
 import numpy as np
 
+# Step 0: Hardware Device Resolution & Diagnostics
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 print("==================================================")
 print("   PHASE 7: REAL WILDS CAMELYON17 SMOKE TEST")
 print("==================================================")
 print(f"Python Executable: {sys.executable}")
 print(f"PyTorch Version: {torch.__version__}")
+print(f"CUDA Available: {torch.cuda.is_available()}")
+
+if torch.cuda.is_available():
+    print(f"CUDA Version: {torch.version.cuda}")
+    print(f"GPU Count: {torch.cuda.device_count()}")
+    print(f"GPU Model: {torch.cuda.get_device_name(0)}")
+    print(f"Total VRAM: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f} GB")
+    print(f"Resolved Hardware Device: {device} (GPU)")
+else:
+    print(f"CUDA Version: N/A")
+    print(f"Resolved Hardware Device: {device} (CPU Fallback - CUDA not available on this host)")
 
 # Measure initial disk space
 total_disk, used_disk, free_disk = shutil.disk_usage(".")
@@ -86,40 +100,58 @@ print(f"Unseen Test Center 4: {len(test_indices):,} samples")
 assert len(client_indices[0]) > 0 and len(client_indices[1]) > 0 and len(client_indices[2]) > 0
 assert len(val_indices) > 0 and len(test_indices) > 0
 
-# Step 4: Small Batch Loading and Forward Pass
-print("\n[Step 4] Testing Real Batch Loading & Model Forward Pass...")
+# Step 4: Small Batch Loading, Device Transfer, and Model Forward Pass
+print("\n[Step 4] Testing Real Batch Loading, Device Placement & Model Forward Pass...")
 test_subset = torch.utils.data.Subset(dataset, client_indices[0][:4])
 smoke_loader = torch.utils.data.DataLoader(test_subset, batch_size=4, shuffle=False)
 
 for x_batch, y_batch, center_batch, slide_batch in smoke_loader:
     break
 
-print(f"Batch Image Tensor Shape: {x_batch.shape} (Expected [4, 3, 96, 96])")
-print(f"Batch Labels: {y_batch.tolist()}")
-print(f"Batch Center IDs: {center_batch.tolist()}")
-print(f"Batch Slide IDs: {slide_batch.tolist()}")
+print(f"Raw Batch Image Shape: {x_batch.shape} (Expected [4, 3, 96, 96])")
+print(f"Raw Batch Labels: {y_batch.tolist()}")
 
-assert x_batch.shape == (4, 3, 96, 96), f"Unexpected shape {x_batch.shape}"
+# Move model to resolved device
+model = ResNet18Backbone(num_classes=2, pretrained=False).to(device)
+model_param_device = next(model.parameters()).device
+print(f"[Device Verification] Model Parameter Device: {model_param_device}")
+assert model_param_device.type == device.type, f"CRITICAL: Model on {model_param_device}, expected {device}!"
 
-model = ResNet18Backbone(num_classes=2, pretrained=False)
+# Move batch tensors to resolved device
+x_batch = x_batch.to(device)
+y_batch = y_batch.to(device)
+print(f"[Device Verification] Input Image Tensor Device: {x_batch.device}")
+print(f"[Device Verification] Target Labels Tensor Device: {y_batch.device}")
+assert x_batch.device.type == device.type, f"CRITICAL: x_batch on {x_batch.device}, expected {device}!"
+assert y_batch.device.type == device.type, f"CRITICAL: y_batch on {y_batch.device}, expected {device}!"
+
+if torch.cuda.is_available():
+    assert model_param_device.type == "cuda", "CRITICAL ERROR: CUDA is available but Model remained on CPU!"
+    assert x_batch.device.type == "cuda", "CRITICAL ERROR: CUDA is available but x_batch remained on CPU!"
+    assert y_batch.device.type == "cuda", "CRITICAL ERROR: CUDA is available but y_batch remained on CPU!"
+
 model.eval()
 with torch.no_grad():
     logits = model(x_batch)
     features = model.extract_features(x_batch)
+
+print(f"[Device Verification] Forward Output Logits Device: {logits.device}")
+assert logits.device.type == device.type, f"CRITICAL: Logits on {logits.device}, expected {device}!"
 print(f"Model Forward Output Logits Shape: {logits.shape} (Expected [4, 2])")
 print(f"Features Tensor Shape: {features.shape} (Expected [4, 512])")
 assert logits.shape == (4, 2)
 assert features.shape == (4, 512)
 
-# Step 5: Training Step with DP-SGD Gradient Clipping & Noise
-print("\n[Step 5] Testing 1 Training Step with Focal Loss and DP Gradient Clipping...")
+# Step 5: Training Step with DP-SGD Gradient Clipping & Noise on Active Device
+print(f"\n[Step 5] Testing 1 Training Step with Focal Loss & DP Clipping on {device}...")
 criterion = LocalFocalLoss(alpha=[0.5, 0.5], gamma=2.0)
 optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 clipper = DPGradientClipper(max_grad_norm=1.0, noise_multiplier=0.8, enabled=True)
 
 model.train()
 optimizer.zero_grad()
-loss_val = clipper.clip_and_noise_sample_grad(model, criterion, x_batch, y_batch, device='cpu')
+print(f"[Device Verification] Executing DP Gradient Clipping on Device: {device}")
+loss_val = clipper.clip_and_noise_sample_grad(model, criterion, x_batch, y_batch, device=device)
 
 # Record clipped & noised gradient norm
 total_grad_norm = 0.0
@@ -132,7 +164,7 @@ optimizer.step()
 
 print(f"Step Mean Loss: {loss_val:.4f}")
 print(f"Post-clipping + Noise Gradient Norm: {total_grad_norm:.4f}")
-print(f"DP Per-Sample Clipping & Gaussian Noise Injection: EXECUTED")
+print(f"DP Per-Sample Clipping & Gaussian Noise Injection on {device}: EXECUTED")
 
 # Step 6: 1 Minimal Federated Aggregation Step (Smooth DRO)
 print("\n[Step 6] Testing 1 Federated Aggregation Step...")
@@ -153,8 +185,8 @@ print(f"Smooth DRO Aggregation Weights: {dro_weights}")
 assert len(dro_weights) == 3
 assert abs(sum(dro_weights) - 1.0) < 1e-4
 
-# Step 7: Validation and OOD Evaluation Step on Real Patches
-print("\n[Step 7] Testing Real Evaluation on Validation (Center 3) and Test (Center 4) Subsets...")
+# Step 7: Validation and OOD Evaluation Step on Active Device
+print(f"\n[Step 7] Testing Real Evaluation on Validation (Center 3) & Test (Center 4) Subsets on {device}...")
 val_smoke_loader = torch.utils.data.DataLoader(
     torch.utils.data.Subset(dataset, val_indices[:16]),
     batch_size=8, shuffle=False
@@ -169,8 +201,10 @@ def evaluate_smoke(eval_loader, name):
     all_preds, all_probs, all_targets, all_slides = [], [], [], []
     with torch.no_grad():
         for x, y, c, s in eval_loader:
+            x = x.to(device)
             out = model(x)
-            probs = torch.softmax(out, dim=1).numpy()
+            assert out.device.type == device.type, f"CRITICAL: Eval output on {out.device}, expected {device}!"
+            probs = torch.softmax(out, dim=1).cpu().numpy()
             preds = np.argmax(probs, axis=1)
             all_probs.extend(probs)
             all_preds.extend(preds)
@@ -182,7 +216,7 @@ def evaluate_smoke(eval_loader, name):
     slide_eval = SlideEvaluator()
     tumor_probs = all_probs[:, 1] if all_probs.shape[1] > 1 else all_probs[:, 0]
     slide_metrics = slide_eval.evaluate_slides(tumor_probs, all_targets, all_slides)
-    print(f"  {name} - Accuracy: {metrics['accuracy']:.4f}, AUROC: {metrics['auroc']:.4f}, Slide AUROC: {slide_metrics['slide_auroc']:.4f}")
+    print(f"  {name} [Device: {device}] - Accuracy: {metrics['accuracy']:.4f}, AUROC: {metrics['auroc']:.4f}, Slide AUROC: {slide_metrics['slide_auroc']:.4f}")
     return {**metrics, **slide_metrics}
 
 val_res = evaluate_smoke(val_smoke_loader, "Val Center 3 (Smoke Subset)")
@@ -192,5 +226,5 @@ test_res = evaluate_smoke(test_smoke_loader, "Test Center 4 Unseen (Smoke Subset
 _, _, final_free = shutil.disk_usage(".")
 print(f"\nRemaining Free Disk Space: {final_free / (1024**3):.2f} GB")
 print("\n==================================================")
-print("   REAL CAMELYON17 SMOKE TEST COMPLETED SUCCESSFULLY!")
+print(f"   REAL CAMELYON17 SMOKE TEST ({device}) COMPLETED SUCCESSFULLY!")
 print("==================================================")
