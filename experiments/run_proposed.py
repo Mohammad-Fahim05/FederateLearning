@@ -15,7 +15,7 @@ def run_proposed_method(config_path='./configs/camelyon17_wilds.yaml'):
     os.makedirs(config['logging']['results_dir'], exist_ok=True)
     os.makedirs(config['logging']['save_dir'], exist_ok=True)
     
-    seeds = [42, 123, 456, 789, 2026]
+    seeds = config.get('project', {}).get('seeds', [42, 123, 456, 789, 2026])
     privacy_budgets = [3.0, 1.0, 8.0]
     
     results = []

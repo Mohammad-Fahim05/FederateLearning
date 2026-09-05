@@ -13,6 +13,9 @@ def run_ablation_study(config_path='./configs/camelyon17_wilds.yaml'):
         config = yaml.safe_load(f)
         
     os.makedirs(config['logging']['results_dir'], exist_ok=True)
+    os.makedirs(config['logging']['save_dir'], exist_ok=True)
+    
+    seeds = config.get('project', {}).get('seeds', [42, 123, 456, 789, 2026])
     
     ablation_variants = [
         ('DP-WHFedDG Full', {'method': 'DP-WHFedDG', 'privacy_enabled': True, 'focal': True, 'sam_rho': 0.05}),
@@ -23,50 +26,70 @@ def run_ablation_study(config_path='./configs/camelyon17_wilds.yaml'):
     ]
     
     results = []
-    use_synthetic = config.get('dataset', {}).get('use_synthetic', False)
-    dataset = Camelyon17HospitalDataset(
-        root_dir=config['dataset'].get('root_dir', './data'),
-        download=config['dataset'].get('download', True),
-        use_synthetic=use_synthetic,
-        seed=config['project']['seed']
-    )
-    splitter = HospitalClientSplitter(dataset, train_centers=config['dataset']['train_centers'], seed=config['project']['seed'])
-    client_indices = splitter.get_natural_split()
-    test_indices = dataset.get_center_subsets([config['dataset']['test_center']])
     
     for name, params in ablation_variants:
         print(f"\n------------------------------------------")
-        print(f"   ABLATION VARIANT: {name}")
+        print(f"   ABLATION VARIANT: {name} across {len(seeds)} seeds: {seeds}")
         print(f"------------------------------------------")
         
-        cfg = copy_config(config)
-        cfg['method'] = params['method']
-        cfg['privacy']['enabled'] = params['privacy_enabled']
-        cfg['federated']['sam_rho'] = params['sam_rho']
-        if not params['focal']:
-            cfg['federated']['focal_gamma'] = 0.0  # Equivalent to CE
-            
-        trainer = FederatedTrainer(
-            dataset=dataset,
-            client_indices=client_indices,
-            config=cfg,
-            method_name=params['method'],
-            device=cfg['project']['device']
-        )
+        seed_accs = []
+        seed_aurocs = []
+        seed_slide_aurocs = []
+        spent_epsilons = []
         
-        rounds = cfg['federated']['rounds']
-        history = trainer.run_training(rounds=rounds)
-        test_metrics = trainer.evaluate_on_subset(test_indices)
+        for seed in seeds:
+            cfg = copy_config(config)
+            cfg['project']['seed'] = seed
+            cfg['method'] = params['method']
+            cfg['privacy']['enabled'] = params['privacy_enabled']
+            cfg['federated']['sam_rho'] = params['sam_rho']
+            if not params['focal']:
+                cfg['federated']['focal_gamma'] = 0.0  # Equivalent to CE
+                
+            use_synthetic = cfg.get('dataset', {}).get('use_synthetic', False)
+            dataset = Camelyon17HospitalDataset(
+                root_dir=cfg['dataset'].get('root_dir', './data'),
+                download=cfg['dataset'].get('download', True),
+                use_synthetic=use_synthetic,
+                seed=seed
+            )
+            splitter = HospitalClientSplitter(dataset, train_centers=cfg['dataset']['train_centers'], seed=seed)
+            client_indices = splitter.get_natural_split()
+            test_indices = dataset.get_center_subsets([cfg['dataset']['test_center']])
+            
+            trainer = FederatedTrainer(
+                dataset=dataset,
+                client_indices=client_indices,
+                config=cfg,
+                method_name=params['method'],
+                device=cfg['project']['device']
+            )
+            
+            rounds = cfg['federated']['rounds']
+            history = trainer.run_training(rounds=rounds)
+            test_metrics = trainer.evaluate_on_subset(test_indices)
+            
+            seed_accs.append(test_metrics['accuracy'])
+            seed_aurocs.append(test_metrics['auroc'])
+            seed_slide_aurocs.append(test_metrics['slide_auroc'])
+            spent_epsilons.append(history['privacy_spent_eps'][-1])
+            
+        mean_acc = np.mean(seed_accs)
+        std_acc = np.std(seed_accs)
+        mean_auroc = np.mean(seed_aurocs)
+        mean_slide_auroc = np.mean(seed_slide_aurocs)
         
         res = {
             'Ablation Variant': name,
-            'Target Center 4 Patch Accuracy': test_metrics['accuracy'],
-            'Target Center 4 AUROC': test_metrics['auroc'],
-            'Target Center 4 Slide AUROC': test_metrics['slide_auroc'],
-            'Spent Epsilon': history['privacy_spent_eps'][-1]
+            'Mean Test Center 4 Accuracy': mean_acc,
+            'Std Test Center 4 Accuracy': std_acc,
+            'Mean Test Center 4 AUROC': mean_auroc,
+            'Mean Test Center 4 Slide AUROC': mean_slide_auroc,
+            'Spent Epsilon': spent_epsilons[-1],
+            'Seeds Evaluated': len(seeds)
         }
         results.append(res)
-        print(f"Ablation '{name}': Accuracy = {test_metrics['accuracy']:.4f}, Slide AUROC = {test_metrics['slide_auroc']:.4f}")
+        print(f"Ablation '{name}': Accuracy = {mean_acc*100:.2f}% ± {std_acc*100:.2f}%, Slide AUROC = {mean_slide_auroc:.4f}")
 
     results_df = pd.DataFrame(results)
     save_path = os.path.join(config['logging']['results_dir'], 'ablation_results.csv')

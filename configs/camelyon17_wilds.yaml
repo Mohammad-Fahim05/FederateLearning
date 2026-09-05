@@ -3,6 +3,7 @@
 project:
   name: "DP-WHFedDG"
   seed: 42
+  seeds: [42, 123, 456, 789, 2026]
   device: "auto"  # "auto" (detects CUDA if available, cpu otherwise), "cuda", or "cpu"
 
 dataset:
