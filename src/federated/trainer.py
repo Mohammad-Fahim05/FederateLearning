@@ -126,6 +126,11 @@ class FederatedTrainer:
                 client_weights.append(weights)
                 client_losses[cid] = loss
                 client_sample_counts[cid] = client.num_samples
+                if torch.cuda.is_available() and self.device.type == 'cuda':
+                    c_mem = torch.cuda.memory_allocated() / (1024**2)
+                    c_res = torch.cuda.memory_reserved() / (1024**2)
+                    c_max = torch.cuda.max_memory_allocated() / (1024**2)
+                    print(f"  [Client {cid} Complete] CUDA Mem: {c_mem:.1f} MB (Reserved: {c_res:.1f} MB, Peak: {c_max:.1f} MB)")
                 
             # Central server aggregation
             agg_weights = self.server.aggregate(client_weights, client_losses, client_sample_counts)
