@@ -39,7 +39,7 @@ class HospitalClient:
         )
         
         # DP Clipper with memory-safe chunking
-        chunk_size = config.get('privacy', {}).get('chunk_size', 8)
+        chunk_size = config.get('privacy', {}).get('chunk_size', 64)
         self.dp_clipper = DPGradientClipper(
             max_grad_norm=config['privacy']['max_grad_norm'],
             noise_multiplier=config['privacy']['noise_multiplier'] if config['privacy']['enabled'] else 0.0,

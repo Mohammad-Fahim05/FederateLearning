@@ -6,11 +6,11 @@ class DPGradientClipper:
     Computes per-sample gradients in memory-safe micro-chunks via torch.func.vmap to eliminate GPU OOM spikes
     while maintaining exact mathematical equivalence.
     """
-    def __init__(self, max_grad_norm=1.0, noise_multiplier=0.8, enabled=True, chunk_size=8):
+    def __init__(self, max_grad_norm=1.0, noise_multiplier=0.8, enabled=True, chunk_size=64):
         self.max_grad_norm = float(max_grad_norm)
         self.noise_multiplier = float(noise_multiplier)
         self.enabled = enabled
-        self.chunk_size = int(chunk_size) if chunk_size is not None else 8
+        self.chunk_size = int(chunk_size) if chunk_size is not None else 64
 
     def clip_and_noise_sample_grad(self, model, criterion, images, labels, device='cpu'):
         """

@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--local_epochs", type=int, default=None, help="Override local epochs (e.g. 1 for dev run)")
     parser.add_argument("--eval_every_round", action="store_true", default=False, help="Evaluate validation center every round")
     parser.add_argument("--tag", type=str, default="controlled_run", help="Unique tag for saving artifacts")
+    parser.add_argument("--cache_in_ram", action="store_true", default=False, help="Preload training patches into RAM cache")
     parser.add_argument("--data_dir", type=str, default="/kaggle/input/datasets/mohdfam/camelyon17-wilds", help="Path to Camelyon17 dataset")
     args = parser.parse_args()
 
@@ -51,6 +52,8 @@ def main():
     config['federated']['rounds'] = args.rounds
     if args.local_epochs is not None:
         config['federated']['local_epochs'] = args.local_epochs
+    if args.cache_in_ram:
+        config['dataset']['cache_in_ram'] = True
 
     # Hardware detection
     cuda_available = torch.cuda.is_available()
@@ -80,6 +83,7 @@ def main():
     print(f"8. Training Centers:       {train_centers}")
     print(f"9. Validation Center:      {val_center}")
     print(f"10. Unseen Test Center:    {test_center}")
+    print(f"11. RAM Caching Enabled:   {config['dataset'].get('cache_in_ram', False)}")
     print("======================================================================\n")
 
     os.makedirs(config['logging']['results_dir'], exist_ok=True)
@@ -106,6 +110,11 @@ def main():
     print(f"  - Training Clients (Centers 0, 1, 2): {[len(client_indices[i]) for i in range(len(train_centers))]} samples")
     print(f"  - Validation Center {val_center}: {len(val_indices):,} samples")
     print(f"  - Unseen Test Center {test_center}: {len(test_indices):,} samples (Strictly Isolated)")
+
+    # Optional Preloading into RAM cache for training centers [0, 1, 2] ONLY
+    if config['dataset'].get('cache_in_ram', False):
+        all_train_indices = [idx for sublist in client_indices.values() for idx in sublist]
+        dataset.preload_train_cache(all_train_indices)
 
     # Reset GPU peak memory tracking
     if cuda_available:

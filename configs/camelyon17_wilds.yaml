@@ -17,6 +17,7 @@ dataset:
   val_center: 3
   test_center: 4
   loho_folds: 5
+  cache_in_ram: false
 
 federated:
   num_clients: 3
@@ -36,6 +37,7 @@ privacy:
   target_delta: 0.00001
   max_grad_norm: 1.0
   noise_multiplier: 0.8  # Dynamically updated by RDP accountant
+  chunk_size: 64
 
 dro:
   eta: 0.5  # Temperature for noise-bounded smooth worst-hospital softmax weighting

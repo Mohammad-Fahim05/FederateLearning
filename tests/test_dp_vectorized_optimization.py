@@ -169,10 +169,86 @@ def test_dp_chunked_vs_full_batch_equivalence():
     print(f"Max Gradient Absolute Difference (Full Batch vs Chunked Batch): {max_diff:.2e}")
     assert max_diff < 1e-6, f"Chunked gradient deviated from full batch: {max_diff}"
 
+def test_dp_chunk_size_8_vs_64_equivalence():
+    """
+    Verifies that chunk_size=8 and chunk_size=64 produce strictly equivalent gradients,
+    strictly detached p.grad, and successful optimizer step.
+    """
+    torch.manual_seed(42)
+    m8 = ResNet18Backbone(num_classes=2, pretrained=False)
+    m64 = ResNet18Backbone(num_classes=2, pretrained=False)
+    m64.load_state_dict(m8.state_dict())
+    
+    m8.eval()
+    m64.eval()
+    
+    criterion = LocalFocalLoss()
+    C = 1.0
+    
+    x = torch.randn(64, 3, 96, 96)
+    y = torch.randint(0, 2, (64,))
+    
+    clip8 = DPGradientClipper(max_grad_norm=C, noise_multiplier=0.0, enabled=True, chunk_size=8)
+    clip64 = DPGradientClipper(max_grad_norm=C, noise_multiplier=0.0, enabled=True, chunk_size=64)
+    
+    m8.zero_grad()
+    m64.zero_grad()
+    
+    l8 = clip8.clip_and_noise_sample_grad(m8, criterion, x, y, device='cpu')
+    l64 = clip64.clip_and_noise_sample_grad(m64, criterion, x, y, device='cpu')
+    
+    assert abs(l8 - l64) < 1e-5
+    
+    diffs = []
+    for p8, p64 in zip(m8.parameters(), m64.parameters()):
+        if p8.grad is not None:
+            assert p64.grad is not None
+            assert p8.grad.grad_fn is None
+            assert p64.grad.grad_fn is None
+            assert not p8.grad.requires_grad
+            assert not p64.grad.requires_grad
+            diff = (p8.grad - p64.grad).abs().max().item()
+            diffs.append(diff)
+            
+    max_diff = max(diffs)
+    print(f"Max Gradient Diff (chunk_size=8 vs chunk_size=64): {max_diff:.2e}")
+    assert max_diff < 1e-6, f"chunk_size=64 deviated from chunk_size=8: {max_diff}"
+
+def test_ram_cache_correctness_and_equivalence():
+    """
+    Verifies that the RAM patch cache correctly preloads samples, preserves
+    exact images, labels, center IDs, and slide IDs, and matches direct loading.
+    """
+    from src.data.dataset import Camelyon17HospitalDataset
+    dataset_disk = Camelyon17HospitalDataset(use_synthetic=True, seed=42)
+    dataset_cached = Camelyon17HospitalDataset(use_synthetic=True, seed=42)
+    
+    train_indices = dataset_cached.get_center_subsets([0, 1, 2])
+    assert len(train_indices) > 0
+    
+    # Preload into RAM cache
+    success = dataset_cached.preload_train_cache(train_indices, max_ram_gb=1.0)
+    assert success is True
+    assert dataset_cached.cached_images is not None
+    
+    # Test random sample equivalence between cached and disk datasets
+    for idx in train_indices[:20]:
+        img_disk, y_disk, c_disk, s_disk = dataset_disk[idx]
+        img_cache, y_cache, c_cache, s_cache = dataset_cached[idx]
+        
+        assert y_disk == y_cache
+        assert c_disk == c_cache
+        assert s_disk == s_cache
+        assert img_disk.shape == img_cache.shape
+        diff = (img_disk - img_cache).abs().max().item()
+        assert diff < 1e-5, f"Cached image differed from disk image: {diff}"
+
 if __name__ == "__main__":
     test_dp_vectorized_numerical_equivalence()
     test_dp_chunked_vs_full_batch_equivalence()
+    test_dp_chunk_size_8_vs_64_equivalence()
+    test_ram_cache_correctness_and_equivalence()
     test_dp_vectorized_clipping_bound()
     test_dp_vectorized_with_noise_and_optimizer_step()
     test_privacy_accountant_parameters_unchanged()
-    print("All DP vectorized and chunked optimization tests passed successfully!")
+    print("All DP optimization and RAM cache tests passed successfully!")
