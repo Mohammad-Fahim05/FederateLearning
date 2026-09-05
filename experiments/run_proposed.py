@@ -56,7 +56,8 @@ def run_proposed_method(config_path='./configs/camelyon17_wilds.yaml'):
                 device=cfg['project']['device']
             )
             
-            history = trainer.run_training(rounds=20)
+            rounds = cfg['federated']['rounds']
+            history = trainer.run_training(rounds=rounds)
             test_metrics = trainer.evaluate_on_subset(test_indices)
             
             seed_accs.append(test_metrics['accuracy'])

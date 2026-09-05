@@ -79,9 +79,32 @@ class Camelyon17HospitalDataset(Dataset):
         self.use_synthetic = use_synthetic
         
         if not use_synthetic:
+            # Smart root_dir resolution for Kaggle and local paths
+            resolved_root = root_dir
+            candidate_roots = [
+                root_dir,
+                "/kaggle/input/datasets/mohdfam/camelyon17-wilds",
+                "/kaggle/input/camelyon17-wilds",
+                os.environ.get("CAMELYON17_DATA_DIR", ""),
+                "./data"
+            ]
+            for cand in candidate_roots:
+                if cand and os.path.exists(cand):
+                    if os.path.exists(os.path.join(cand, "camelyon17_v1.0", "metadata.csv")):
+                        resolved_root = cand
+                        break
+                    elif os.path.exists(os.path.join(cand, "metadata.csv")):
+                        # If cand directly contains metadata.csv, parent is root_dir if folder is camelyon17_v1.0
+                        parent = os.path.dirname(os.path.abspath(cand))
+                        if os.path.basename(os.path.abspath(cand)) == "camelyon17_v1.0":
+                            resolved_root = parent
+                            break
+                        resolved_root = cand
+                        break
+
             try:
                 import wilds
-                self.wilds_dataset = wilds.get_dataset(dataset='camelyon17', download=download, root_dir=root_dir)
+                self.wilds_dataset = wilds.get_dataset(dataset='camelyon17', download=download, root_dir=resolved_root)
                 self.data = self.wilds_dataset
                 self.is_wilds = True
                 # Identify center/hospital field name in WILDS metadata
@@ -93,7 +116,7 @@ class Camelyon17HospitalDataset(Dataset):
                     self.center_field = self.wilds_dataset.metadata_fields[0]
             except Exception as e:
                 raise RuntimeError(
-                    f"Failed to load real WILDS Camelyon17 dataset from root_dir='{root_dir}' with download={download}. "
+                    f"Failed to load real WILDS Camelyon17 dataset from root_dir='{resolved_root}' (original='{root_dir}') with download={download}. "
                     f"Original error: {e}"
                 ) from e
         else:

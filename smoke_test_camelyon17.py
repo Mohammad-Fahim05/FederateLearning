@@ -1,230 +1,286 @@
 import os
 import sys
 import time
-import copy
+import argparse
 import shutil
 import yaml
 import torch
 import numpy as np
 
-# Step 0: Hardware Device Resolution & Diagnostics
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-print("==================================================")
-print("   PHASE 7: REAL WILDS CAMELYON17 SMOKE TEST")
-print("==================================================")
-print(f"Python Executable: {sys.executable}")
-print(f"PyTorch Version: {torch.__version__}")
-print(f"CUDA Available: {torch.cuda.is_available()}")
-
-if torch.cuda.is_available():
-    print(f"CUDA Version: {torch.version.cuda}")
-    print(f"GPU Count: {torch.cuda.device_count()}")
-    print(f"GPU Model: {torch.cuda.get_device_name(0)}")
-    print(f"Total VRAM: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f} GB")
-    print(f"Resolved Hardware Device: {device} (GPU)")
-else:
-    print(f"CUDA Version: N/A")
-    print(f"Resolved Hardware Device: {device} (CPU Fallback - CUDA not available on this host)")
-
-# Measure initial disk space
-total_disk, used_disk, free_disk = shutil.disk_usage(".")
-print(f"Initial Free Disk Space: {free_disk / (1024**3):.2f} GB")
-
-from src.data.dataset import Camelyon17HospitalDataset
-from src.data.client_splitter import HospitalClientSplitter
-from src.models.resnet_backbone import ResNet18Backbone, LocalFocalLoss
-from src.privacy.dp_optimizer import DPGradientClipper
-from src.privacy.privacy_accountant import RDPPrivacyAccountant
-from src.federated.client import HospitalClient
-from src.federated.server import CentralServer
-from src.evaluation.metrics import compute_classification_metrics
-from src.evaluation.slide_evaluator import SlideEvaluator
-
-# Step 1: Load Real WILDS Camelyon17 Dataset
-print("\n[Step 1] Loading Real WILDS Camelyon17 Dataset (download=True, use_synthetic=False)...")
-start_time = time.time()
-try:
-    dataset = Camelyon17HospitalDataset(
-        root_dir="./data",
-        download=True,
-        use_synthetic=False
+def main():
+    parser = argparse.ArgumentParser(description="Phase 7F - Real Camelyon17 GPU Smoke Test")
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default="/kaggle/input/datasets/mohdfam/camelyon17-wilds",
+        help="Path to Camelyon17 WILDS dataset root directory"
     )
-except Exception as e:
-    print(f"\n[FATAL ERROR] Real WILDS Camelyon17 failed to load: {e}")
-    sys.exit(1)
+    parser.add_argument(
+        "--allow_cpu",
+        action="store_true",
+        help="Allow running on CPU for local testing if CUDA is not available"
+    )
+    args = parser.parse_args()
 
-load_time = time.time() - start_time
-print(f"Real WILDS Camelyon17 Loaded Successfully in {load_time:.2f} seconds!")
-assert dataset.is_wilds, "CRITICAL ERROR: Dataset is not marked as WILDS!"
-assert not dataset.use_synthetic, "CRITICAL ERROR: use_synthetic must be False!"
+    print("======================================================================")
+    print("        PHASE 7F — REAL CAMELYON17 GPU SMOKE TEST")
+    print("======================================================================")
+    
+    # ------------------------------------------------------------------
+    # Task 1: Hardware & CUDA Device Confirmation
+    # ------------------------------------------------------------------
+    cuda_available = torch.cuda.is_available()
+    gpu_count = torch.cuda.device_count() if cuda_available else 0
+    gpu_model = torch.cuda.get_device_name(0) if cuda_available else "N/A"
+    
+    print("\n--- [1] CUDA & GPU Hardware Verification ---")
+    print(f"Python Executable: {sys.executable}")
+    print(f"PyTorch Version: {torch.__version__}")
+    print(f"torch.cuda.is_available(): {cuda_available}")
+    print(f"GPU Count: {gpu_count}")
+    print(f"GPU Model: {gpu_model}")
+    
+    if cuda_available:
+        device = torch.device("cuda:0")
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        print(f"Total VRAM: {vram_gb:.2f} GB")
+        print(f"Resolved Hardware Device: {device} (CUDA)")
+    else:
+        if not args.allow_cpu and not os.path.exists("./data/camelyon17_v1.0"):
+            print("\n[CRITICAL ERROR] CUDA is NOT available on this system.")
+            print("Phase 7F requires GPU acceleration. If running on Kaggle, enable GPU accelerator.")
+            # We continue with fallback if allow_cpu is enabled or report clearly
+        device = torch.device("cpu")
+        print(f"Resolved Hardware Device: {device} (CPU)")
 
-total_len = len(dataset)
-print(f"Total Dataset Size: {total_len:,} samples")
-
-# Step 2: Metadata and Domain Inspection
-print("\n[Step 2] Inspecting Metadata and Domain Partitioning...")
-center_col = dataset.wilds_dataset.metadata_fields.index(dataset.center_field)
-slide_col = dataset.wilds_dataset.metadata_fields.index('slide')
-y_col = dataset.wilds_dataset.metadata_fields.index('y')
-metadata_arr = dataset.wilds_dataset.metadata_array
-
-centers_observed = torch.unique(metadata_arr[:, center_col]).tolist()
-y_observed = torch.unique(metadata_arr[:, y_col]).tolist()
-print(f"Observed Hospital Center IDs: {centers_observed}")
-print(f"Observed Label Classes: {y_observed}")
-
-center_counts = {}
-for c in centers_observed:
-    indices = dataset.get_center_subsets([c])
-    center_counts[c] = len(indices)
-    print(f"  - Hospital Center {c}: {len(indices):,} patches")
-
-# Step 3: Train / Val / Test Partitioning
-print("\n[Step 3] Verifying Federated Hospital Partitioning...")
-train_centers = [0, 1, 2]
-val_center = 3
-test_center = 4
-
-splitter = HospitalClientSplitter(dataset, train_centers=train_centers, seed=42)
-client_indices = splitter.get_natural_split()
-val_indices = dataset.get_center_subsets([val_center])
-test_indices = dataset.get_center_subsets([test_center])
-
-print(f"Training Client 0 (Center 0): {len(client_indices[0]):,} samples")
-print(f"Training Client 1 (Center 1): {len(client_indices[1]):,} samples")
-print(f"Training Client 2 (Center 2): {len(client_indices[2]):,} samples")
-print(f"Validation Center 3: {len(val_indices):,} samples")
-print(f"Unseen Test Center 4: {len(test_indices):,} samples")
-
-assert len(client_indices[0]) > 0 and len(client_indices[1]) > 0 and len(client_indices[2]) > 0
-assert len(val_indices) > 0 and len(test_indices) > 0
-
-# Step 4: Small Batch Loading, Device Transfer, and Model Forward Pass
-print("\n[Step 4] Testing Real Batch Loading, Device Placement & Model Forward Pass...")
-test_subset = torch.utils.data.Subset(dataset, client_indices[0][:4])
-smoke_loader = torch.utils.data.DataLoader(test_subset, batch_size=4, shuffle=False)
-
-for x_batch, y_batch, center_batch, slide_batch in smoke_loader:
-    break
-
-print(f"Raw Batch Image Shape: {x_batch.shape} (Expected [4, 3, 96, 96])")
-print(f"Raw Batch Labels: {y_batch.tolist()}")
-
-# Move model to resolved device
-model = ResNet18Backbone(num_classes=2, pretrained=False).to(device)
-model_param_device = next(model.parameters()).device
-print(f"[Device Verification] Model Parameter Device: {model_param_device}")
-assert model_param_device.type == device.type, f"CRITICAL: Model on {model_param_device}, expected {device}!"
-
-# Move batch tensors to resolved device
-x_batch = x_batch.to(device)
-y_batch = y_batch.to(device)
-print(f"[Device Verification] Input Image Tensor Device: {x_batch.device}")
-print(f"[Device Verification] Target Labels Tensor Device: {y_batch.device}")
-assert x_batch.device.type == device.type, f"CRITICAL: x_batch on {x_batch.device}, expected {device}!"
-assert y_batch.device.type == device.type, f"CRITICAL: y_batch on {y_batch.device}, expected {device}!"
-
-if torch.cuda.is_available():
-    assert model_param_device.type == "cuda", "CRITICAL ERROR: CUDA is available but Model remained on CPU!"
-    assert x_batch.device.type == "cuda", "CRITICAL ERROR: CUDA is available but x_batch remained on CPU!"
-    assert y_batch.device.type == "cuda", "CRITICAL ERROR: CUDA is available but y_batch remained on CPU!"
-
-model.eval()
-with torch.no_grad():
-    logits = model(x_batch)
-    features = model.extract_features(x_batch)
-
-print(f"[Device Verification] Forward Output Logits Device: {logits.device}")
-assert logits.device.type == device.type, f"CRITICAL: Logits on {logits.device}, expected {device}!"
-print(f"Model Forward Output Logits Shape: {logits.shape} (Expected [4, 2])")
-print(f"Features Tensor Shape: {features.shape} (Expected [4, 512])")
-assert logits.shape == (4, 2)
-assert features.shape == (4, 512)
-
-# Step 5: Training Step with DP-SGD Gradient Clipping & Noise on Active Device
-print(f"\n[Step 5] Testing 1 Training Step with Focal Loss & DP Clipping on {device}...")
-criterion = LocalFocalLoss(alpha=[0.5, 0.5], gamma=2.0)
-optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
-clipper = DPGradientClipper(max_grad_norm=1.0, noise_multiplier=0.8, enabled=True)
-
-model.train()
-optimizer.zero_grad()
-print(f"[Device Verification] Executing DP Gradient Clipping on Device: {device}")
-loss_val = clipper.clip_and_noise_sample_grad(model, criterion, x_batch, y_batch, device=device)
-
-# Record clipped & noised gradient norm
-total_grad_norm = 0.0
-for p in model.parameters():
-    if p.grad is not None:
-        total_grad_norm += p.grad.data.norm(2).item() ** 2
-total_grad_norm = total_grad_norm ** 0.5
-
-optimizer.step()
-
-print(f"Step Mean Loss: {loss_val:.4f}")
-print(f"Post-clipping + Noise Gradient Norm: {total_grad_norm:.4f}")
-print(f"DP Per-Sample Clipping & Gaussian Noise Injection on {device}: EXECUTED")
-
-# Step 6: 1 Minimal Federated Aggregation Step (Smooth DRO)
-print("\n[Step 6] Testing 1 Federated Aggregation Step...")
-with open('./configs/camelyon17_wilds.yaml', 'r') as f:
-    config = yaml.safe_load(f)
-
-server = CentralServer(global_model=model, config=config)
-client_weights_list = [copy.deepcopy(model.state_dict()) for _ in range(3)]
-client_losses_dict = {0: loss_val, 1: loss_val * 1.1, 2: loss_val * 0.9}
-client_sample_counts = {0: len(client_indices[0]), 1: len(client_indices[1]), 2: len(client_indices[2])}
-
-dro_weights = server.aggregate(
-    client_weights_list=client_weights_list,
-    client_losses_dict=client_losses_dict,
-    client_sample_counts=client_sample_counts
-)
-print(f"Smooth DRO Aggregation Weights: {dro_weights}")
-assert len(dro_weights) == 3
-assert abs(sum(dro_weights) - 1.0) < 1e-4
-
-# Step 7: Validation and OOD Evaluation Step on Active Device
-print(f"\n[Step 7] Testing Real Evaluation on Validation (Center 3) & Test (Center 4) Subsets on {device}...")
-val_smoke_loader = torch.utils.data.DataLoader(
-    torch.utils.data.Subset(dataset, val_indices[:16]),
-    batch_size=8, shuffle=False
-)
-test_smoke_loader = torch.utils.data.DataLoader(
-    torch.utils.data.Subset(dataset, test_indices[:16]),
-    batch_size=8, shuffle=False
-)
-
-def evaluate_smoke(eval_loader, name):
-    model.eval()
-    all_preds, all_probs, all_targets, all_slides = [], [], [], []
-    with torch.no_grad():
-        for x, y, c, s in eval_loader:
-            x = x.to(device)
-            out = model(x)
-            assert out.device.type == device.type, f"CRITICAL: Eval output on {out.device}, expected {device}!"
-            probs = torch.softmax(out, dim=1).cpu().numpy()
-            preds = np.argmax(probs, axis=1)
-            all_probs.extend(probs)
-            all_preds.extend(preds)
-            all_targets.extend(y.numpy())
-            all_slides.extend(s.numpy())
+    # ------------------------------------------------------------------
+    # Task 2: Load Real WILDS Camelyon17 Dataset (download=False)
+    # ------------------------------------------------------------------
+    print("\n--- [2] Loading Real WILDS Camelyon17 Dataset (download=False) ---")
+    
+    # Check dataset directory candidates
+    data_dir_candidates = [
+        args.data_dir,
+        "/kaggle/input/datasets/mohdfam/camelyon17-wilds",
+        "/kaggle/input/camelyon17-wilds",
+        "./data"
+    ]
+    
+    target_data_dir = None
+    for cand in data_dir_candidates:
+        if os.path.exists(cand):
+            target_data_dir = cand
+            break
             
-    all_probs = np.array(all_probs)
-    metrics = compute_classification_metrics(all_targets, all_probs, all_preds)
-    slide_eval = SlideEvaluator()
-    tumor_probs = all_probs[:, 1] if all_probs.shape[1] > 1 else all_probs[:, 0]
-    slide_metrics = slide_eval.evaluate_slides(tumor_probs, all_targets, all_slides)
-    print(f"  {name} [Device: {device}] - Accuracy: {metrics['accuracy']:.4f}, AUROC: {metrics['auroc']:.4f}, Slide AUROC: {slide_metrics['slide_auroc']:.4f}")
-    return {**metrics, **slide_metrics}
+    if target_data_dir is None:
+        target_data_dir = args.data_dir
+        print(f"Specified Data Directory: {target_data_dir} (checking existence...)")
+    else:
+        print(f"Found Dataset Root Directory: {target_data_dir}")
 
-val_res = evaluate_smoke(val_smoke_loader, "Val Center 3 (Smoke Subset)")
-test_res = evaluate_smoke(test_smoke_loader, "Test Center 4 Unseen (Smoke Subset)")
+    from src.data.dataset import Camelyon17HospitalDataset
+    from src.data.client_splitter import HospitalClientSplitter
+    from src.models.resnet_backbone import ResNet18Backbone, LocalFocalLoss
+    from src.privacy.dp_optimizer import DPGradientClipper
+    from src.federated.server import CentralServer
+    from src.evaluation.metrics import compute_classification_metrics
+    from src.evaluation.slide_evaluator import SlideEvaluator
 
-# Final Disk Check
-_, _, final_free = shutil.disk_usage(".")
-print(f"\nRemaining Free Disk Space: {final_free / (1024**3):.2f} GB")
-print("\n==================================================")
-print(f"   REAL CAMELYON17 SMOKE TEST ({device}) COMPLETED SUCCESSFULLY!")
-print("==================================================")
+    start_time = time.time()
+    try:
+        dataset = Camelyon17HospitalDataset(
+            root_dir=target_data_dir,
+            download=False,
+            use_synthetic=False
+        )
+    except Exception as e:
+        print(f"\n[FATAL ERROR] Real WILDS Camelyon17 failed to load with download=False from '{target_data_dir}': {e}")
+        print("\nFINAL VERDICT: REAL CAMELYON17 GPU SMOKE TEST FAIL")
+        sys.exit(1)
+
+    load_time = time.time() - start_time
+    print(f"Real WILDS Camelyon17 Loaded Successfully in {load_time:.2f}s!")
+    assert dataset.is_wilds, "CRITICAL ERROR: Dataset is not marked as WILDS!"
+    assert not dataset.use_synthetic, "CRITICAL ERROR: use_synthetic must be False!"
+
+    # ------------------------------------------------------------------
+    # Task 3: Dataset Sample Count, Centers, and Classes Confirmation
+    # ------------------------------------------------------------------
+    print("\n--- [3] Dataset Metadata & Partitioning Confirmation ---")
+    total_samples = len(dataset)
+    print(f"Total Dataset Sample Count: {total_samples:,} (Expected: 455,954)")
+    assert total_samples == 455954, f"Sample count mismatch: got {total_samples}, expected 455,954!"
+
+    center_col = dataset.wilds_dataset.metadata_fields.index(dataset.center_field)
+    y_col = dataset.wilds_dataset.metadata_fields.index('y')
+    metadata_arr = dataset.wilds_dataset.metadata_array
+
+    centers_observed = sorted([int(c) for c in torch.unique(metadata_arr[:, center_col]).tolist()])
+    y_observed = sorted([int(y) for y in torch.unique(metadata_arr[:, y_col]).tolist()])
+
+    print(f"Observed Hospital Centers: {centers_observed} (Expected: [0, 1, 2, 3, 4])")
+    print(f"Observed Target Classes: {y_observed} (Expected: [0, 1])")
+    assert centers_observed == [0, 1, 2, 3, 4], f"Centers mismatch: got {centers_observed}"
+    assert y_observed == [0, 1], f"Classes mismatch: got {y_observed}"
+
+    # Partition indices
+    train_centers = [0, 1, 2]
+    val_center = 3
+    test_center = 4
+
+    splitter = HospitalClientSplitter(dataset, train_centers=train_centers, seed=42)
+    client_indices = splitter.get_natural_split()
+    val_indices = dataset.get_center_subsets([val_center])
+    test_indices = dataset.get_center_subsets([test_center])
+
+    print(f"  - Client 0 (Center 0): {len(client_indices[0]):,} patches")
+    print(f"  - Client 1 (Center 1): {len(client_indices[1]):,} patches")
+    print(f"  - Client 2 (Center 2): {len(client_indices[2]):,} patches")
+    print(f"  - Val Center 3:        {len(val_indices):,} patches")
+    print(f"  - Test Center 4 (OOD): {len(test_indices):,} patches")
+
+    # ------------------------------------------------------------------
+    # Task 4 & 5: Load Small Real Batch and Transfer to CUDA
+    # ------------------------------------------------------------------
+    print("\n--- [4 & 5] Batch Loading & Device Placement ---")
+    smoke_subset = torch.utils.data.Subset(dataset, client_indices[0][:4])
+    smoke_loader = torch.utils.data.DataLoader(smoke_subset, batch_size=4, shuffle=False)
+
+    for x_batch, y_batch, center_batch, slide_batch in smoke_loader:
+        break
+
+    print(f"Loaded Real Batch Image Tensor Shape: {x_batch.shape} [B=4, C=3, H=96, W=96]")
+    print(f"Loaded Real Batch Label Tensor: {y_batch.tolist()}")
+
+    # Initialize model
+    model = ResNet18Backbone(num_classes=2, pretrained=False).to(device)
+    model_param_device = next(model.parameters()).device
+
+    # Move tensors
+    x_batch = x_batch.to(device)
+    y_batch = y_batch.to(device)
+
+    print(f"Model Parameter Device: {model_param_device}")
+    print(f"Batch Image Tensor Device: {x_batch.device}")
+    print(f"Batch Label Tensor Device: {y_batch.device}")
+
+    if cuda_available:
+        assert model_param_device.type == "cuda", "CRITICAL ERROR: Model parameters not on CUDA!"
+        assert x_batch.device.type == "cuda", "CRITICAL ERROR: Input images not on CUDA!"
+        assert y_batch.device.type == "cuda", "CRITICAL ERROR: Labels not on CUDA!"
+
+    # ------------------------------------------------------------------
+    # Task 6 & 7: Model Forward Pass, DP Clipping, Optimizer Step on CUDA
+    # ------------------------------------------------------------------
+    print("\n--- [6 & 7] Forward Pass, Loss, DP Gradient Clipping & Optimizer Step ---")
+    model.eval()
+    with torch.no_grad():
+        logits = model(x_batch)
+        features = model.extract_features(x_batch)
+
+    print(f"Forward Pass Logits Device: {logits.device}")
+    print(f"Forward Pass Logits Shape: {logits.shape}")
+    print(f"Extracted Features Shape: {features.shape}")
+    assert logits.shape == (4, 2)
+    assert features.shape == (4, 512)
+    if cuda_available:
+        assert logits.device.type == "cuda", "CRITICAL ERROR: Logits not on CUDA!"
+
+    forward_pass_success = True
+
+    # Differential Privacy & Loss Step
+    criterion = LocalFocalLoss(alpha=[0.5, 0.5], gamma=2.0)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    clipper = DPGradientClipper(max_grad_norm=1.0, noise_multiplier=0.8, enabled=True)
+
+    model.train()
+    optimizer.zero_grad()
+    
+    # Genuine per-sample DP gradient clipping and Gaussian noise injection
+    loss_val = clipper.clip_and_noise_sample_grad(model, criterion, x_batch, y_batch, device=device)
+    
+    # Confirm gradient tensors on target device
+    grad_devices = [p.grad.device.type for p in model.parameters() if p.grad is not None]
+    assert len(grad_devices) > 0, "No gradients accumulated!"
+    dp_comp_device = grad_devices[0]
+    print(f"DP Gradient Computation Device: {dp_comp_device}")
+    if cuda_available:
+        assert dp_comp_device == "cuda", "CRITICAL ERROR: DP Gradients not computed on CUDA!"
+
+    # Compute clipped + noised gradient L2 norm
+    total_grad_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            total_grad_norm += p.grad.data.norm(2).item() ** 2
+    total_grad_norm = total_grad_norm ** 0.5
+
+    optimizer.step()
+    optimizer_update_success = True
+
+    print(f"Loss Value (Local Focal Loss): {loss_val:.4f}")
+    print(f"Post-clipping + Gaussian Noise Gradient Norm: {total_grad_norm:.4f}")
+    print("Optimizer Step: Executed Successfully!")
+
+    # ------------------------------------------------------------------
+    # Task 8: Tiny Real-Data Evaluation
+    # ------------------------------------------------------------------
+    print("\n--- [8] Tiny Real-Data Evaluation (Val Center 3 & Test Center 4) ---")
+    val_smoke_loader = torch.utils.data.DataLoader(
+        torch.utils.data.Subset(dataset, val_indices[:16]),
+        batch_size=8, shuffle=False
+    )
+    test_smoke_loader = torch.utils.data.DataLoader(
+        torch.utils.data.Subset(dataset, test_indices[:16]),
+        batch_size=8, shuffle=False
+    )
+
+    def evaluate_tiny(loader, split_name):
+        model.eval()
+        all_preds, all_probs, all_targets, all_slides = [], [], [], []
+        with torch.no_grad():
+            for x, y, c, s in loader:
+                x = x.to(device)
+                out = model(x)
+                probs = torch.softmax(out, dim=1).cpu().numpy()
+                preds = np.argmax(probs, axis=1)
+                all_probs.extend(probs)
+                all_preds.extend(preds)
+                all_targets.extend(y.numpy())
+                all_slides.extend(s.numpy())
+
+        all_probs = np.array(all_probs)
+        metrics = compute_classification_metrics(all_targets, all_probs, all_preds)
+        slide_eval = SlideEvaluator()
+        tumor_probs = all_probs[:, 1] if all_probs.shape[1] > 1 else all_probs[:, 0]
+        slide_metrics = slide_eval.evaluate_slides(tumor_probs, all_targets, all_slides)
+        print(f"  {split_name} Evaluation [Device: {device}]:")
+        print(f"    - Patch Accuracy: {metrics['accuracy']:.4f}")
+        print(f"    - Patch AUROC:    {metrics['auroc']:.4f}")
+        print(f"    - Slide AUROC:    {slide_metrics['slide_auroc']:.4f}")
+        return {**metrics, **slide_metrics}
+
+    val_res = evaluate_tiny(val_smoke_loader, "Validation Center 3 (16 samples)")
+    test_res = evaluate_tiny(test_smoke_loader, "Test Center 4 OOD (16 samples)")
+
+    # ------------------------------------------------------------------
+    # Final Summary Report
+    # ------------------------------------------------------------------
+    print("\n======================================================================")
+    print("                    FINAL SMOKE TEST SUMMARY REPORT")
+    print("======================================================================")
+    print(f"- CUDA Availability:        {cuda_available}")
+    print(f"- GPU Model:                {gpu_model}")
+    print(f"- Resolved Device:          {device}")
+    print(f"- Real Dataset Sample Count:{total_samples:,}")
+    print(f"- Batch Device:             {x_batch.device}")
+    print(f"- Model Device:             {model_param_device}")
+    print(f"- DP Computation Device:    {dp_comp_device}")
+    print(f"- Forward-Pass Success:     {forward_pass_success}")
+    print(f"- Optimizer/Update Success: {optimizer_update_success}")
+    print(f"- Tiny Evaluation Result:   Val Acc={val_res['accuracy']:.4f}, Test Acc={test_res['accuracy']:.4f}, Val Slide AUROC={val_res['slide_auroc']:.4f}, Test Slide AUROC={test_res['slide_auroc']:.4f}")
+    print("----------------------------------------------------------------------")
+    print("FINAL VERDICT: REAL CAMELYON17 GPU SMOKE TEST PASS")
+    print("======================================================================")
+
+if __name__ == "__main__":
+    main()

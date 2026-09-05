@@ -127,23 +127,39 @@ class FederatedTrainer:
             # Central server aggregation
             agg_weights = self.server.aggregate(client_weights, client_losses, client_sample_counts)
             
-            # Compute cumulative DP Epsilon
+            # Compute exact cumulative DP Epsilon per client
             batch_size = self.config['federated']['batch_size']
-            total_client_samples = sum(client_sample_counts.values())
-            q = batch_size / max(1, total_client_samples)
-            steps = r * self.config['federated']['local_epochs']
-            
+            local_epochs = self.config['federated']['local_epochs']
             noise_mult = self.config['privacy']['noise_multiplier'] if self.config['privacy']['enabled'] else 0.0
-            eps, delta = self.privacy_accountant.get_privacy_spent(q, noise_mult, steps)
+            loss_noise_std = self.config.get('privacy', {}).get('loss_noise_std', 0.05)
+            
+            client_dp_reports = {}
+            for cid, client in self.clients.items():
+                cdp = self.privacy_accountant.get_client_privacy_spent(
+                    num_samples=client.num_samples,
+                    batch_size=batch_size,
+                    local_epochs=local_epochs,
+                    rounds=r,
+                    noise_multiplier=noise_mult,
+                    loss_noise_std=loss_noise_std,
+                    compose_loss=True
+                )
+                client_dp_reports[cid] = cdp
+
+            worst_total_eps = max(cdp['total_epsilon'] for cdp in client_dp_reports.values())
+            worst_grad_eps = max(cdp['grad_epsilon'] for cdp in client_dp_reports.values())
             
             # Evaluate per-round progress
             avg_loss = sum(client_losses.values()) / len(client_losses)
             history['rounds'].append(r)
             history['client_losses'].append(client_losses)
-            history['privacy_spent_eps'].append(eps)
+            history['privacy_spent_eps'].append(worst_total_eps)
+            if 'privacy_grad_eps' not in history:
+                history['privacy_grad_eps'] = []
+            history['privacy_grad_eps'].append(worst_grad_eps)
             
             if r % 10 == 0 or r == 1 or r == rounds:
-                eps_str = f"{eps:.2f}" if eps < float('inf') else "inf (No DP)"
+                eps_str = f"{worst_total_eps:.2f} (grad: {worst_grad_eps:.2f})" if worst_total_eps < float('inf') else "inf (No DP)"
                 print(f"Round [{r}/{rounds}] - Avg Loss: {avg_loss:.4f} | Spent DP Epsilon: {eps_str}")
                 
         return history

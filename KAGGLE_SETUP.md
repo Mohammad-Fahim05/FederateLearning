@@ -87,11 +87,11 @@ print("All 11 project modules imported successfully on Kaggle environment!")
 
 ---
 
-### Cell 5: Real WILDS Camelyon17 GPU Smoke Test
-Execute the end-to-end real dataset pipeline smoke test on GPU:
+### Cell 5: Real WILDS Camelyon17 GPU Smoke Test (Phase 7F)
+Execute the end-to-end minimal real dataset GPU smoke test on Kaggle:
 
 ```bash
-!python smoke_test_camelyon17.py
+!python smoke_test_camelyon17.py --data_dir /kaggle/input/datasets/mohdfam/camelyon17-wilds
 ```
 
 ---
@@ -99,20 +99,20 @@ Execute the end-to-end real dataset pipeline smoke test on GPU:
 ## 3. Dataset Path Configuration
 
 In `configs/camelyon17_wilds.yaml`:
-- **Default (Automatic Download to Kaggle Working Storage)**:
+- **Pre-Mounted Kaggle Dataset (Recommended)**:
+  ```yaml
+  dataset:
+    name: "camelyon17"
+    root_dir: "/kaggle/input/datasets/mohdfam/camelyon17-wilds"
+    download: false
+    use_synthetic: false
+  ```
+- **Fallback Automatic Download**:
   ```yaml
   dataset:
     name: "camelyon17"
     root_dir: "./data"
     download: true
-    use_synthetic: false
-  ```
-- **If using Pre-Mounted Kaggle Dataset (Faster setup)**:
-  ```yaml
-  dataset:
-    name: "camelyon17"
-    root_dir: "/kaggle/input/camelyon17-wilds"
-    download: false
     use_synthetic: false
   ```
 

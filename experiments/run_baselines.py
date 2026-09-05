@@ -53,7 +53,8 @@ def run_all_baselines(config_path='./configs/camelyon17_wilds.yaml'):
             device=config['project']['device']
         )
         
-        history = trainer.run_training(rounds=20)
+        rounds = cfg['federated']['rounds']
+        history = trainer.run_training(rounds=rounds)
         
         # Evaluate on validation center (Center 3) and unseen test center (Center 4)
         val_metrics = trainer.evaluate_on_subset(val_indices)
