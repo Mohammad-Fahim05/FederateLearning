@@ -1,0 +1,132 @@
+import os
+import torch
+from torch.utils.data import Dataset, DataLoader, Subset
+import numpy as np
+from PIL import Image
+from src.data.preprocessing import get_transforms
+
+class SyntheticCamelyon17Dataset(Dataset):
+    """
+    Synthetic Camelyon17 benchmark dataset generator.
+    Simulates 5 hospital centers (Centers 0, 1, 2, 3, 4), WSI slide IDs,
+    and 96x96 tissue patches with realistic domain stain shifts and class imbalance.
+    Used for reproducible pipeline verification, unit testing, and fast experiment iterations.
+    """
+    def __init__(self, num_samples_per_center=500, transform=None, seed=42):
+        super().__init__()
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        self.transform = transform
+        
+        self.samples = []
+        self.labels = []
+        self.center_ids = []
+        self.slide_ids = []
+        
+        # 5 Hospitals, 10 slides per hospital = 50 WSIs total
+        for center in range(5):
+            # Center-specific stain color shift (domain shift)
+            stain_shift = torch.tensor([center * 0.08, (4 - center) * 0.05, center * 0.03]).view(3, 1, 1)
+            
+            for slide in range(10):
+                slide_id = center * 10 + slide
+                num_patches = num_samples_per_center // 10
+                
+                for p in range(num_patches):
+                    label = 1 if (p % 2 == 0) else 0
+                    
+                    # Generate synthetic 96x96 tissue patch pattern
+                    base_pattern = torch.randn(3, 96, 96) * 0.2 + 0.7
+                    if label == 1:
+                        # Tumor patch has higher central nuclear density
+                        base_pattern[:, 32:64, 32:64] -= 0.35
+                        
+                    patch = torch.clamp(base_pattern + stain_shift, 0.0, 1.0)
+                    patch_pil = T_to_pil(patch)
+                    
+                    self.samples.append(patch_pil)
+                    self.labels.append(label)
+                    self.center_ids.append(center)
+                    self.slide_ids.append(slide_id)
+                    
+    def __len__(self):
+        return len(self.samples)
+        
+    def __getitem__(self, idx):
+        img = self.samples[idx]
+        label = self.labels[idx]
+        center_id = self.center_ids[idx]
+        slide_id = self.slide_ids[idx]
+        
+        if self.transform:
+            img = self.transform(img)
+            
+        return img, label, center_id, slide_id
+
+def T_to_pil(tensor_img):
+    img_np = (tensor_img.numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
+    return Image.fromarray(img_np)
+
+class Camelyon17HospitalDataset(Dataset):
+    """
+    Unified PyTorch Dataset for Camelyon17.
+    Supports WILDS Camelyon17 dataset or Synthetic benchmark fallback.
+    """
+    def __init__(self, root_dir="./data", download=False, use_synthetic=False, transform=None, seed=42):
+        if transform is None:
+            transform = get_transforms(is_train=False)
+        self.transform = transform
+        self.use_synthetic = use_synthetic
+        
+        if not use_synthetic:
+            try:
+                import wilds
+                self.wilds_dataset = wilds.get_dataset(dataset='camelyon17', download=download, root_dir=root_dir)
+                self.data = self.wilds_dataset
+                self.is_wilds = True
+                # Identify center/hospital field name in WILDS metadata
+                if 'center' in self.wilds_dataset.metadata_fields:
+                    self.center_field = 'center'
+                elif 'hospital' in self.wilds_dataset.metadata_fields:
+                    self.center_field = 'hospital'
+                else:
+                    self.center_field = self.wilds_dataset.metadata_fields[0]
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to load real WILDS Camelyon17 dataset from root_dir='{root_dir}' with download={download}. "
+                    f"Original error: {e}"
+                ) from e
+        else:
+            self.is_wilds = False
+            self.synthetic_ds = SyntheticCamelyon17Dataset(num_samples_per_center=500, transform=transform, seed=seed)
+            
+    def get_center_subsets(self, centers):
+        """
+        Extracts patch indices belonging to specific hospital center IDs.
+        """
+        if self.is_wilds:
+            all_metadata = self.wilds_dataset.metadata_array
+            center_col = self.wilds_dataset.metadata_fields.index(self.center_field)
+            indices = [i for i, meta in enumerate(all_metadata) if meta[center_col].item() in centers]
+        else:
+            indices = [i for i, c in enumerate(self.synthetic_ds.center_ids) if c in centers]
+            
+        return indices
+        
+    def __len__(self):
+        if self.is_wilds:
+            return len(self.wilds_dataset)
+        return len(self.synthetic_ds)
+        
+    def __getitem__(self, idx):
+        if self.is_wilds:
+            x, y, metadata = self.wilds_dataset[idx]
+            center_col = self.wilds_dataset.metadata_fields.index(self.center_field)
+            center_id = metadata[center_col].item()
+            slide_col = self.wilds_dataset.metadata_fields.index('slide') if 'slide' in self.wilds_dataset.metadata_fields else 1
+            slide_id = metadata[slide_col].item()
+            if self.transform:
+                x = self.transform(x)
+            return x, y.item(), center_id, slide_id
+        else:
+            return self.synthetic_ds[idx]

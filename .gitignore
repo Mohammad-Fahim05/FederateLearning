@@ -1,0 +1,54 @@
+# Python Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Caches and Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Datasets and Archives (root level data only)
+/data/
+./data/
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.h5
+*.hdf5
+
+# Checkpoints, Runs, Logs, and Experiment Results
+checkpoints/
+results/
+runs/
+logs/
+*.ckpt
+*.pt
+*.pth
+*.log
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+
+# IDE and Editor Configurations
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

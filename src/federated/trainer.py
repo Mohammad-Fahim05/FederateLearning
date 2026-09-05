@@ -1,0 +1,149 @@
+import torch
+from torch.utils.data import DataLoader, Subset
+import numpy as np
+import copy
+from src.models.resnet_backbone import ResNet18Backbone
+from src.federated.client import HospitalClient
+from src.federated.server import CentralServer
+from src.privacy.privacy_accountant import RDPPrivacyAccountant
+from src.evaluation.metrics import compute_classification_metrics, compute_worst_hospital_metric
+from src.evaluation.slide_evaluator import SlideEvaluator
+
+class FederatedTrainer:
+    """
+    Coordinator for Federated Learning experiments.
+    Manages clients, communication rounds, privacy accounting, server aggregation, and hospital evaluation.
+    """
+    def __init__(self, dataset, client_indices, config, method_name='DP-WHFedDG', device=None):
+        self.dataset = dataset
+        self.client_indices = client_indices
+        self.config = config
+        self.method_name = method_name
+        
+        # Auto-detect device if 'auto' or None
+        if device is None:
+            config_device = config.get('project', {}).get('device', 'auto')
+        else:
+            config_device = device
+            
+        if config_device == 'auto' or config_device is None:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(config_device)
+            
+        # Initialize Global ResNet-18 Model
+        self.global_model = ResNet18Backbone(
+            num_classes=config['dataset']['num_classes'],
+            pretrained=False
+        ).to(self.device)
+        
+        # Config algorithm
+        config['method'] = method_name
+        self.server = CentralServer(self.global_model, config)
+        
+        # Instantiate Hospital Clients
+        self.clients = {}
+        for cid, indices in client_indices.items():
+            self.clients[cid] = HospitalClient(
+                client_id=cid,
+                dataset=dataset,
+                indices=indices,
+                config=config,
+                device=self.device
+            )
+            
+        # RDP Privacy Accountant
+        self.privacy_accountant = RDPPrivacyAccountant(
+            target_delta=config['privacy']['target_delta']
+        )
+        
+        self.slide_evaluator = SlideEvaluator()
+
+    def evaluate_on_subset(self, indices):
+        """
+        Evaluates the global model on a specific subset of data.
+        Returns patch-level metrics and slide-level metrics.
+        """
+        self.global_model.eval()
+        subset = Subset(self.dataset, indices)
+        loader = DataLoader(subset, batch_size=self.config['federated']['batch_size'], shuffle=False)
+        
+        all_targets = []
+        all_preds = []
+        all_probs = []
+        all_slide_ids = []
+        
+        with torch.no_grad():
+            for images, labels, _, slide_ids in loader:
+                images = images.to(self.device)
+                outputs = self.global_model(images)
+                probs = torch.softmax(outputs, dim=1).cpu().numpy()
+                preds = np.argmax(probs, axis=1)
+                
+                all_targets.extend(labels.numpy())
+                all_preds.extend(preds)
+                all_probs.extend(probs)
+                all_slide_ids.extend(slide_ids.numpy())
+                
+        all_probs = np.array(all_probs)
+        patch_metrics = compute_classification_metrics(all_targets, all_probs, all_preds)
+        
+        tumor_probs = all_probs[:, 1] if all_probs.shape[1] > 1 else all_probs[:, 0]
+        slide_metrics = self.slide_evaluator.evaluate_slides(tumor_probs, all_targets, all_slide_ids)
+        
+        metrics = {**patch_metrics, **slide_metrics}
+        return metrics
+
+    def run_training(self, rounds=None):
+        """
+        Executes T communication rounds.
+        """
+        if rounds is None:
+            rounds = self.config['federated']['rounds']
+            
+        history = {
+            'rounds': [],
+            'client_losses': [],
+            'privacy_spent_eps': [],
+            'train_center_metrics': {},
+            'val_center_metrics': [],
+            'test_center_metrics': []
+        }
+        
+        print(f"--- Starting Federated Training ({self.method_name}) for {rounds} Rounds ---")
+        
+        for r in range(1, rounds + 1):
+            client_weights = []
+            client_losses = {}
+            client_sample_counts = {}
+            
+            # Local training at each hospital client
+            for cid, client in self.clients.items():
+                weights, loss = client.local_train(self.global_model)
+                client_weights.append(weights)
+                client_losses[cid] = loss
+                client_sample_counts[cid] = client.num_samples
+                
+            # Central server aggregation
+            agg_weights = self.server.aggregate(client_weights, client_losses, client_sample_counts)
+            
+            # Compute cumulative DP Epsilon
+            batch_size = self.config['federated']['batch_size']
+            total_client_samples = sum(client_sample_counts.values())
+            q = batch_size / max(1, total_client_samples)
+            steps = r * self.config['federated']['local_epochs']
+            
+            noise_mult = self.config['privacy']['noise_multiplier'] if self.config['privacy']['enabled'] else 0.0
+            eps, delta = self.privacy_accountant.get_privacy_spent(q, noise_mult, steps)
+            
+            # Evaluate per-round progress
+            avg_loss = sum(client_losses.values()) / len(client_losses)
+            history['rounds'].append(r)
+            history['client_losses'].append(client_losses)
+            history['privacy_spent_eps'].append(eps)
+            
+            if r % 10 == 0 or r == 1 or r == rounds:
+                eps_str = f"{eps:.2f}" if eps < float('inf') else "inf (No DP)"
+                print(f"Round [{r}/{rounds}] - Avg Loss: {avg_loss:.4f} | Spent DP Epsilon: {eps_str}")
+                
+        return history

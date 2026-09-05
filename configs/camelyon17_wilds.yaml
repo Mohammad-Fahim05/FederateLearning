@@ -1,0 +1,46 @@
+# Configuration for DP-WHFedDG on Camelyon17 Benchmark
+
+project:
+  name: "DP-WHFedDG"
+  seed: 42
+  device: "auto"  # "auto" (detects CUDA if available, cpu otherwise), "cuda", or "cpu"
+
+dataset:
+  name: "camelyon17"
+  root_dir: "./data"
+  download: true
+  use_synthetic: false
+  patch_size: [96, 96]
+  num_classes: 2
+  train_centers: [0, 1, 2]
+  val_center: 3
+  test_center: 4
+  loho_folds: 5
+
+federated:
+  num_clients: 3
+  rounds: 100
+  local_epochs: 2
+  batch_size: 64
+  learning_rate: 0.001
+  momentum: 0.9
+  weight_decay: 0.0001
+  focal_gamma: 2.0
+  focal_alpha: [0.5, 0.5]
+  sam_rho: 0.05
+
+privacy:
+  enabled: true
+  target_epsilon: 3.0
+  target_delta: 0.00001
+  max_grad_norm: 1.0
+  noise_multiplier: 0.8  # Dynamically updated by RDP accountant
+
+dro:
+  eta: 0.5  # Temperature for noise-bounded smooth worst-hospital softmax weighting
+  ema_decay: 0.9
+
+logging:
+  save_dir: "./checkpoints"
+  log_dir: "./logs"
+  results_dir: "./results"
