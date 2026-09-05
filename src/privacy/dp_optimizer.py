@@ -64,23 +64,24 @@ class DPGradientClipper:
                 # 1. Compute per-sample gradients for this chunk
                 chunk_sample_grads = ft_vmap(params, buffers, chunk_imgs, chunk_lbls)
 
-                # 2. Compute per-sample gradient L2 norms for the chunk
-                chunk_norms_sq = torch.zeros(curr_chunk_size, device=images.device)
-                for p_name, s_grad in chunk_sample_grads.items():
-                    chunk_norms_sq += s_grad.flatten(start_dim=1).pow(2).sum(dim=1)
-                chunk_norms = chunk_norms_sq.sqrt()
-
-                # 3. Per-sample scaling factor min(1, C / ||g_i||_2)
-                chunk_clip_coefs = torch.clamp(self.max_grad_norm / (chunk_norms + 1e-6), max=1.0)
-
-                # 4. Accumulate clipped gradients
-                for name, s_grad in chunk_sample_grads.items():
-                    view_shape = [curr_chunk_size] + [1] * (s_grad.dim() - 1)
-                    clipped_chunk_sg = s_grad * chunk_clip_coefs.view(*view_shape)
-                    accum_clipped_grads[name] += clipped_chunk_sg.sum(dim=0)
-
-                # 5. Track loss
+                # All clipping, norm calculation, and accumulation strictly detached in no_grad
                 with torch.no_grad():
+                    # 2. Compute per-sample gradient L2 norms for the chunk
+                    chunk_norms_sq = torch.zeros(curr_chunk_size, device=images.device)
+                    for p_name, s_grad in chunk_sample_grads.items():
+                        chunk_norms_sq += s_grad.detach().flatten(start_dim=1).pow(2).sum(dim=1)
+                    chunk_norms = chunk_norms_sq.sqrt()
+
+                    # 3. Per-sample scaling factor min(1, C / ||g_i||_2)
+                    chunk_clip_coefs = torch.clamp(self.max_grad_norm / (chunk_norms + 1e-6), max=1.0)
+
+                    # 4. Accumulate clipped gradients (strictly detached)
+                    for name, s_grad in chunk_sample_grads.items():
+                        view_shape = [curr_chunk_size] + [1] * (s_grad.dim() - 1)
+                        clipped_chunk_sg = s_grad.detach() * chunk_clip_coefs.view(*view_shape)
+                        accum_clipped_grads[name] += clipped_chunk_sg.sum(dim=0)
+
+                    # 5. Track loss
                     chunk_out = model(chunk_imgs)
                     c_loss = criterion(chunk_out, chunk_lbls)
                     c_val = c_loss.item() if c_loss.dim() == 0 else c_loss.mean().item()
@@ -95,15 +96,17 @@ class DPGradientClipper:
         total_loss = total_loss_accum / batch_size
 
         # Set parameter gradients: averaged clipped gradient (sum / B) + Gaussian noise
+        # Strictly detached with requires_grad=False and grad_fn=None to prevent autograd graph retention
         model.zero_grad()
-        for name, p in model.named_parameters():
-            if p.requires_grad and name in accum_clipped_grads:
-                avg_clipped_grad = accum_clipped_grads[name] / batch_size
-                if self.noise_multiplier > 0:
-                    std = (self.noise_multiplier * self.max_grad_norm) / batch_size
-                    noise = torch.randn_like(p.data) * std
-                    p.grad = avg_clipped_grad + noise
-                else:
-                    p.grad = avg_clipped_grad
+        with torch.no_grad():
+            for name, p in model.named_parameters():
+                if p.requires_grad and name in accum_clipped_grads:
+                    avg_clipped_grad = accum_clipped_grads[name] / batch_size
+                    if self.noise_multiplier > 0:
+                        std = (self.noise_multiplier * self.max_grad_norm) / batch_size
+                        noise = torch.randn_like(p.data) * std
+                        p.grad = (avg_clipped_grad + noise).detach()
+                    else:
+                        p.grad = avg_clipped_grad.detach()
 
         return total_loss
