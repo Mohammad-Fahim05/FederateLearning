@@ -94,10 +94,11 @@ class FederatedTrainer:
         metrics = {**patch_metrics, **slide_metrics}
         return metrics
 
-    def run_training(self, rounds=None):
+    def run_training(self, rounds=None, eval_val_indices=None):
         """
         Executes T communication rounds.
         """
+        import time
         if rounds is None:
             rounds = self.config['federated']['rounds']
             
@@ -107,12 +108,14 @@ class FederatedTrainer:
             'privacy_spent_eps': [],
             'train_center_metrics': {},
             'val_center_metrics': [],
-            'test_center_metrics': []
+            'test_center_metrics': [],
+            'round_times': []
         }
         
         print(f"--- Starting Federated Training ({self.method_name}) for {rounds} Rounds ---")
         
         for r in range(1, rounds + 1):
+            r_start_time = time.time()
             client_weights = []
             client_losses = {}
             client_sample_counts = {}
@@ -151,15 +154,27 @@ class FederatedTrainer:
             
             # Evaluate per-round progress
             avg_loss = sum(client_losses.values()) / len(client_losses)
+            r_elapsed = time.time() - r_start_time
             history['rounds'].append(r)
             history['client_losses'].append(client_losses)
             history['privacy_spent_eps'].append(worst_total_eps)
+            history['round_times'].append(r_elapsed)
             if 'privacy_grad_eps' not in history:
                 history['privacy_grad_eps'] = []
             history['privacy_grad_eps'].append(worst_grad_eps)
             
-            if r % 10 == 0 or r == 1 or r == rounds:
+            # Optional per-round validation evaluation (e.g. for development runs)
+            if eval_val_indices is not None:
+                val_metrics = self.evaluate_on_subset(eval_val_indices)
+                history['val_center_metrics'].append(val_metrics)
+                acc = val_metrics.get('accuracy', 0.0)
+                bacc = val_metrics.get('balanced_accuracy', 0.0)
+                f1 = val_metrics.get('macro_f1', 0.0)
+                auc = val_metrics.get('auroc', 0.0)
+                ece = val_metrics.get('ece', 0.0)
+                print(f"Round [{r:02d}/{rounds:02d}] | Train Loss: {avg_loss:.4f} | Val Acc: {acc*100:.2f}% | Val BalAcc: {bacc*100:.2f}% | Val F1: {f1:.4f} | Val AUROC: {auc:.4f} | Val ECE: {ece:.4f} | Time: {r_elapsed:.1f}s")
+            elif r % 10 == 0 or r == 1 or r == rounds:
                 eps_str = f"{worst_total_eps:.2f} (grad: {worst_grad_eps:.2f})" if worst_total_eps < float('inf') else "inf (No DP)"
-                print(f"Round [{r}/{rounds}] - Avg Loss: {avg_loss:.4f} | Spent DP Epsilon: {eps_str}")
+                print(f"Round [{r}/{rounds}] - Avg Loss: {avg_loss:.4f} | Spent DP Epsilon: {eps_str} | Time: {r_elapsed:.1f}s")
                 
         return history

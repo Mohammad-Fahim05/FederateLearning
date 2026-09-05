@@ -33,6 +33,9 @@ def main():
     parser.add_argument("--epsilon", type=float, default=3.0, help="Target privacy epsilon")
     parser.add_argument("--seed", type=int, default=42, help="Experiment random seed")
     parser.add_argument("--rounds", type=int, default=100, help="Number of federated communication rounds")
+    parser.add_argument("--local_epochs", type=int, default=None, help="Override local epochs (e.g. 1 for dev run)")
+    parser.add_argument("--eval_every_round", action="store_true", default=False, help="Evaluate validation center every round")
+    parser.add_argument("--tag", type=str, default="controlled_run", help="Unique tag for saving artifacts")
     parser.add_argument("--data_dir", type=str, default="/kaggle/input/datasets/mohdfam/camelyon17-wilds", help="Path to Camelyon17 dataset")
     args = parser.parse_args()
 
@@ -46,6 +49,8 @@ def main():
     config['privacy']['target_epsilon'] = args.epsilon
     config['method'] = args.method
     config['federated']['rounds'] = args.rounds
+    if args.local_epochs is not None:
+        config['federated']['local_epochs'] = args.local_epochs
 
     # Hardware detection
     cuda_available = torch.cuda.is_available()
@@ -119,7 +124,10 @@ def main():
     # Run Federated Training
     print(f"\n[4/5] Executing Complete {args.rounds}-Round Federated Training Loop...")
     start_time = time.time()
-    history = trainer.run_training(rounds=args.rounds)
+    history = trainer.run_training(
+        rounds=args.rounds,
+        eval_val_indices=val_indices if args.eval_every_round else None
+    )
     elapsed_time = time.time() - start_time
 
     # Record peak memory
@@ -144,8 +152,10 @@ def main():
         
     worst_hosp_eval = compute_worst_hospital_metric(train_hospital_metrics)
 
-    # Save checkpoint
-    checkpoint_path = os.path.join(config['logging']['save_dir'], f"{args.method}_seed{args.seed}_eps{args.epsilon}_final.pt")
+    # Save checkpoint with unique tag
+    epochs_val = config['federated']['local_epochs']
+    checkpoint_name = f"{args.tag}_{args.method}_rounds{args.rounds}_epochs{epochs_val}_seed{args.seed}_eps{args.epsilon}.pt"
+    checkpoint_path = os.path.join(config['logging']['save_dir'], checkpoint_name)
     torch.save({
         'model_state_dict': trainer.global_model.state_dict(),
         'config': config,
@@ -162,18 +172,21 @@ def main():
         'Epsilon': args.epsilon,
         'Seed': args.seed,
         'Rounds': args.rounds,
+        'Local Epochs': epochs_val,
         'Elapsed Time (s)': elapsed_time,
         'Peak VRAM (GB)': peak_vram_gb,
         'Val Center 3 Accuracy': val_metrics['accuracy'],
         'Val Center 3 Balanced Accuracy': val_metrics.get('balanced_accuracy', 0.0),
         'Val Center 3 Macro F1': val_metrics.get('macro_f1', 0.0),
         'Val Center 3 AUROC': val_metrics['auroc'],
+        'Val Center 3 ECE': val_metrics.get('ece', 0.0),
         'Val Center 3 Slide AUROC': val_metrics['slide_auroc'],
         'Val Center 3 Slide Accuracy': val_metrics['slide_accuracy'],
         'Test Center 4 Accuracy (Unseen)': test_metrics['accuracy'],
         'Test Center 4 Balanced Accuracy': test_metrics.get('balanced_accuracy', 0.0),
         'Test Center 4 Macro F1': test_metrics.get('macro_f1', 0.0),
         'Test Center 4 AUROC': test_metrics['auroc'],
+        'Test Center 4 ECE': test_metrics.get('ece', 0.0),
         'Test Center 4 Slide AUROC': test_metrics['slide_auroc'],
         'Test Center 4 Slide Accuracy': test_metrics['slide_accuracy'],
         'Worst Train Hospital Accuracy': worst_hosp_eval['worst_hospital_accuracy'],
@@ -182,7 +195,8 @@ def main():
         'Spent Epsilon (Gradient-Only)': history.get('privacy_grad_eps', [0.0])[-1]
     }])
     
-    results_csv_path = os.path.join(config['logging']['results_dir'], f"phase10a_{args.method}_seed{args.seed}_results.csv")
+    results_csv_name = f"{args.tag}_{args.method}_rounds{args.rounds}_epochs{epochs_val}_seed{args.seed}_results.csv"
+    results_csv_path = os.path.join(config['logging']['results_dir'], results_csv_name)
     summary_df.to_csv(results_csv_path, index=False)
 
     # ------------------------------------------------------------------
