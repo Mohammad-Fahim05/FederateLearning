@@ -141,3 +141,39 @@ def test_csv_metric_keys_coverage():
         parts = metric.split('_')
         for part in parts:
             assert part in joined_keys, f"Metric '{metric}' (part: '{part}') missing from baseline CSV schema"
+
+
+def test_run_baselines_cli_parsing(monkeypatch):
+    """
+    Verify CLI arguments (--config, --method, --rounds, --local_epochs, --seed)
+    are correctly parsed by parse_args().
+    """
+    import sys
+    from experiments.run_baselines import parse_args
+    
+    test_args = [
+        "run_baselines.py",
+        "--config", "./configs/camelyon17_wilds.yaml",
+        "--method", "FedAvg",
+        "--rounds", "5",
+        "--local_epochs", "1",
+        "--seed", "42"
+    ]
+    monkeypatch.setattr(sys, "argv", test_args)
+    args = parse_args()
+    
+    assert args.config == "./configs/camelyon17_wilds.yaml"
+    assert args.method == "FedAvg"
+    assert args.rounds == 5
+    assert args.local_epochs == 1
+    assert args.seed == 42
+
+    # Verify defaults when no optional args are provided
+    monkeypatch.setattr(sys, "argv", ["run_baselines.py"])
+    default_args = parse_args()
+    assert default_args.config == "./configs/camelyon17_wilds.yaml"
+    assert default_args.method is None
+    assert default_args.rounds is None
+    assert default_args.local_epochs is None
+    assert default_args.seed is None
+

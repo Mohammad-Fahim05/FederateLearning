@@ -9,20 +9,28 @@ from src.data.client_splitter import HospitalClientSplitter
 from src.federated.trainer import FederatedTrainer
 from src.utils.artifact_persister import persist_experiment_artifacts
 
-def run_all_baselines(config_path='./configs/camelyon17_wilds.yaml'):
+def run_all_baselines(config_path='./configs/camelyon17_wilds.yaml', method=None, rounds=None, local_epochs=None, seed=None):
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
         
     os.makedirs(config['logging']['results_dir'], exist_ok=True)
     os.makedirs(config['logging']['save_dir'], exist_ok=True)
     
-    seeds = config.get('project', {}).get('seeds', [42, 123, 456, 789, 2026])
-    baselines = ['FedAvg', 'FedProx', 'GroupDRO', 'DP-FedAvg']
+    if seed is not None:
+        seeds = [int(seed)]
+    else:
+        seeds = config.get('project', {}).get('seeds', [42, 123, 456, 789, 2026])
+        
+    if method is not None:
+        baselines = [method]
+    else:
+        baselines = ['FedAvg', 'FedProx', 'GroupDRO', 'DP-FedAvg']
+        
     results = []
     
-    for method in baselines:
+    for base_method in baselines:
         print(f"\n==========================================")
-        print(f"   RUNNING BASELINE: {method} across {len(seeds)} seeds: {seeds}")
+        print(f"   RUNNING BASELINE: {base_method} across {len(seeds)} seeds: {seeds}")
         print(f"==========================================")
         
         seed_accs = []
@@ -38,12 +46,17 @@ def run_all_baselines(config_path='./configs/camelyon17_wilds.yaml'):
         for seed in seeds:
             cfg = copy_config(config)
             cfg['project']['seed'] = seed
-            if method == 'DP-FedAvg':
+            if rounds is not None:
+                cfg['federated']['rounds'] = int(rounds)
+            if local_epochs is not None:
+                cfg['federated']['local_epochs'] = int(local_epochs)
+                
+            if base_method == 'DP-FedAvg':
                 cfg['privacy']['enabled'] = True
                 cfg['method'] = 'FedAvg'
             else:
                 cfg['privacy']['enabled'] = False
-                cfg['method'] = method
+                cfg['method'] = base_method
                 
             use_synthetic = cfg.get('dataset', {}).get('use_synthetic', False)
             dataset = Camelyon17HospitalDataset(
@@ -62,7 +75,7 @@ def run_all_baselines(config_path='./configs/camelyon17_wilds.yaml'):
                 dataset=dataset,
                 client_indices=client_indices,
                 config=cfg,
-                method_name=method,
+                method_name=base_method,
                 device=cfg['project']['device']
             )
             
@@ -109,8 +122,8 @@ def run_all_baselines(config_path='./configs/camelyon17_wilds.yaml'):
         std_worst_train = np.std(seed_worst_train_accs)
         
         res = {
-            'Method': method,
-            'Privacy Enabled': (method == 'DP-FedAvg'),
+            'Method': base_method,
+            'Privacy Enabled': (base_method == 'DP-FedAvg'),
             'Spent Epsilon': spent_epsilons[-1],
             'Mean Test Center 4 Accuracy': mean_acc,
             'Std Test Center 4 Accuracy': std_acc,
@@ -131,7 +144,7 @@ def run_all_baselines(config_path='./configs/camelyon17_wilds.yaml'):
             'Seeds Evaluated': len(seeds)
         }
         results.append(res)
-        print(f"Results for {method}: Test Center 4 Acc = {mean_acc*100:.2f}% ± {std_acc*100:.2f}%, Slide AUROC = {mean_slide_auroc:.4f}")
+        print(f"Results for {base_method}: Test Center 4 Acc = {mean_acc*100:.2f}% ± {std_acc*100:.2f}%, Slide AUROC = {mean_slide_auroc:.4f}")
 
     results_df = pd.DataFrame(results)
     save_path = os.path.join(config['logging']['results_dir'], 'baseline_results.csv')
@@ -144,5 +157,22 @@ def copy_config(cfg):
     import copy
     return copy.deepcopy(cfg)
 
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(description="Run federated baseline experiments")
+    parser.add_argument('--config', type=str, default='./configs/camelyon17_wilds.yaml', help='Path to YAML configuration file')
+    parser.add_argument('--method', type=str, default=None, choices=['FedAvg', 'FedProx', 'GroupDRO', 'DP-FedAvg'], help='Specific baseline method to run')
+    parser.add_argument('--rounds', type=int, default=None, help='Number of federated communication rounds')
+    parser.add_argument('--local_epochs', type=int, default=None, help='Number of local epochs per client round')
+    parser.add_argument('--seed', type=int, default=None, help='Specific random seed to evaluate')
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    run_all_baselines()
+    args = parse_args()
+    run_all_baselines(
+        config_path=args.config,
+        method=args.method,
+        rounds=args.rounds,
+        local_epochs=args.local_epochs,
+        seed=args.seed
+    )
