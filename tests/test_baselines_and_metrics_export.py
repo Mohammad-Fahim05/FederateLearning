@@ -177,3 +177,45 @@ def test_run_baselines_cli_parsing(monkeypatch):
     assert default_args.local_epochs is None
     assert default_args.seed is None
 
+
+def test_baseline_checkpoint_creation_and_loading(tmp_path):
+    """
+    Verify that baseline experiments save a .pt checkpoint in save_dir and that
+    the checkpoint can be loaded into a ResNet18 model.
+    """
+    import os
+    import yaml
+    from experiments.run_baselines import run_all_baselines
+    
+    # Load base config
+    with open('./configs/camelyon17_wilds.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+        
+    config['dataset']['use_synthetic'] = True
+    config['logging']['save_dir'] = str(tmp_path / "checkpoints")
+    config['logging']['results_dir'] = str(tmp_path / "results")
+    config['project']['device'] = 'cpu'
+    
+    temp_config_path = str(tmp_path / "temp_config.yaml")
+    with open(temp_config_path, 'w') as f:
+        yaml.safe_dump(config, f)
+        
+    # Run 1 lightweight round on synthetic dataset
+    results_df = run_all_baselines(
+        config_path=temp_config_path,
+        method='FedAvg',
+        rounds=1,
+        local_epochs=1,
+        seed=42
+    )
+    
+    expected_ckpt = tmp_path / "checkpoints" / "fedavg_seed42.pt"
+    assert os.path.exists(expected_ckpt), f"Expected checkpoint file not found at {expected_ckpt}"
+    
+    # Verify the checkpoint can be loaded into ResNet18Backbone
+    state_dict = torch.load(expected_ckpt, map_location='cpu')
+    model = ResNet18Backbone(num_classes=2, pretrained=False)
+    model.load_state_dict(state_dict)
+    assert model is not None
+
+

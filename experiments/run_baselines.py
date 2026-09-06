@@ -85,6 +85,13 @@ def run_all_baselines(config_path='./configs/camelyon17_wilds.yaml', method=None
             val_metrics = trainer.evaluate_on_subset(val_indices)
             test_metrics = trainer.evaluate_on_subset(test_indices)
             
+            # Save trained model checkpoint
+            method_clean = base_method.lower().replace('-', '_')
+            ckpt_name = f"{method_clean}_seed{seed}.pt"
+            ckpt_path = os.path.join(cfg['logging']['save_dir'], ckpt_name)
+            torch.save(trainer.global_model.state_dict(), ckpt_path)
+            persist_experiment_artifacts(checkpoint_path=ckpt_path)
+            
             # Hospital metrics breakdown for training centers
             hospital_metrics = {}
             for c in cfg['dataset']['train_centers']:
