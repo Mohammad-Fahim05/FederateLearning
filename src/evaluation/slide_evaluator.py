@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score
 
@@ -44,10 +45,18 @@ class SlideEvaluator:
         slide_top5_mean_probs = np.array(slide_top5_mean_probs)
         
         # Calculate Slide AUROC
-        try:
-            slide_auroc = roc_auc_score(slide_targets, slide_top5_mean_probs)
-        except Exception:
-            slide_auroc = 0.5
+        unique_classes = np.unique(slide_targets)
+        if len(unique_classes) < 2:
+            warnings.warn(
+                f"Slide ROC-AUC is mathematically undefined because only one class ({unique_classes.tolist()}) is present in slide ground truth.",
+                UserWarning
+            )
+            slide_auroc = float('nan')
+        else:
+            try:
+                slide_auroc = roc_auc_score(slide_targets, slide_top5_mean_probs)
+            except Exception:
+                slide_auroc = float('nan')
             
         # Calculate Slide Accuracy at 0.5 threshold
         slide_preds = (slide_top5_mean_probs >= 0.5).astype(int)

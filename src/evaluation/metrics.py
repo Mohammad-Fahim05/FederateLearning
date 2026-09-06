@@ -15,15 +15,21 @@ def compute_classification_metrics(y_true, y_probs, y_preds):
     f1 = f1_score(y_true, y_preds, average='macro', zero_division=0)
     
     try:
-        auroc = roc_auc_score(y_true, y_probs[:, 1])
+        if len(y_probs.shape) > 1 and y_probs.shape[1] > 1:
+            auroc = roc_auc_score(y_true, y_probs[:, 1])
+        else:
+            auroc = roc_auc_score(y_true, y_probs)
     except Exception:
         auroc = 0.5
+        
+    ece = compute_ece(y_true, y_probs)
         
     return {
         'accuracy': float(acc),
         'balanced_accuracy': float(balanced_acc),
         'macro_f1': float(f1),
-        'auroc': float(auroc)
+        'auroc': float(auroc),
+        'ece': float(ece)
     }
 
 def compute_worst_hospital_metric(hospital_metrics):
@@ -51,9 +57,16 @@ def compute_ece(y_true, y_probs, n_bins=10):
     Computes Expected Calibration Error (ECE).
     """
     y_true = np.array(y_true)
-    y_probs = np.max(np.array(y_probs), axis=1)
-    y_preds = np.argmax(np.array(y_probs), axis=1) if len(y_probs.shape) > 1 else (y_probs >= 0.5).astype(int)
+    probs = np.array(y_probs)
     
+    if len(probs.shape) > 1 and probs.shape[1] > 1:
+        confidences = np.max(probs, axis=1)
+        y_preds = np.argmax(probs, axis=1)
+    else:
+        probs_1d = probs.squeeze()
+        confidences = np.where(probs_1d >= 0.5, probs_1d, 1.0 - probs_1d)
+        y_preds = (probs_1d >= 0.5).astype(int)
+        
     bin_boundaries = np.linspace(0, 1, n_bins + 1)
     ece = 0.0
     
@@ -61,12 +74,16 @@ def compute_ece(y_true, y_probs, n_bins=10):
         bin_lower = bin_boundaries[i]
         bin_upper = bin_boundaries[i + 1]
         
-        in_bin = (y_probs > bin_lower) & (y_probs <= bin_upper)
+        if i == 0:
+            in_bin = (confidences >= bin_lower) & (confidences <= bin_upper)
+        else:
+            in_bin = (confidences > bin_lower) & (confidences <= bin_upper)
+            
         prop_in_bin = np.mean(in_bin)
         
         if prop_in_bin > 0:
             accuracy_in_bin = np.mean(y_true[in_bin] == y_preds[in_bin])
-            avg_confidence_in_bin = np.mean(y_probs[in_bin])
+            avg_confidence_in_bin = np.mean(confidences[in_bin])
             ece += np.abs(accuracy_in_bin - avg_confidence_in_bin) * prop_in_bin
             
     return float(ece)
