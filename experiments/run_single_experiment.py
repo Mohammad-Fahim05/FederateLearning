@@ -18,6 +18,7 @@ from src.data.client_splitter import HospitalClientSplitter
 from src.federated.trainer import FederatedTrainer
 from src.evaluation.metrics import compute_classification_metrics, compute_worst_hospital_metric, compute_ece
 from src.evaluation.slide_evaluator import SlideEvaluator
+from src.utils.artifact_persister import persist_experiment_artifacts
 
 def get_git_commit():
     try:
@@ -208,6 +209,12 @@ def main():
     results_csv_path = os.path.join(config['logging']['results_dir'], results_csv_name)
     summary_df.to_csv(results_csv_path, index=False)
 
+    # Persist artifacts to /kaggle/working/experiment_artifacts/
+    persisted_artifacts = persist_experiment_artifacts(
+        checkpoint_path=checkpoint_path,
+        results_csv_path=results_csv_path
+    )
+
     # ------------------------------------------------------------------
     # Post-Run Comprehensive Report
     # ------------------------------------------------------------------
@@ -241,6 +248,10 @@ def main():
     print("\n--- Output & Checkpoint Artifacts ---")
     print(f"  - Checkpoint Saved To:           {checkpoint_path}")
     print(f"  - Results CSV Saved To:          {results_csv_path}")
+    if 'checkpoint' in persisted_artifacts:
+        print(f"  - Persisted Checkpoint:          {persisted_artifacts['checkpoint']}")
+    if 'results_csv' in persisted_artifacts:
+        print(f"  - Persisted Results CSV:         {persisted_artifacts['results_csv']}")
     print("======================================================================")
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ import pandas as pd
 from src.data.dataset import Camelyon17HospitalDataset
 from src.data.client_splitter import HospitalClientSplitter
 from src.federated.trainer import FederatedTrainer
+from src.utils.artifact_persister import persist_experiment_artifacts
 
 def run_proposed_method(config_path='./configs/camelyon17_wilds.yaml'):
     with open(config_path, 'r') as f:
@@ -83,6 +84,7 @@ def run_proposed_method(config_path='./configs/camelyon17_wilds.yaml'):
     results_df = pd.DataFrame(results)
     save_path = os.path.join(config['logging']['results_dir'], 'proposed_dp_whfeddg_results.csv')
     results_df.to_csv(save_path, index=False)
+    persist_experiment_artifacts(results_csv_path=save_path)
     print(f"\nProposed method experiments finished! Results saved to {save_path}")
     return results_df
 
