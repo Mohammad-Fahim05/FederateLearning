@@ -37,10 +37,10 @@ class CentralServer:
             agg_weights = np.array([client_sample_counts[cid] / total_samples for cid in client_ids])
             
         elif self.algorithm == 'GroupDRO':
-            # Standard Group DRO exponentiated gradient weighting
+            # Standard Group DRO exponentiated gradient weighting (numerically stabilized)
             losses = np.array([client_losses_dict[cid] for cid in client_ids])
-            agg_weights = np.exp(self.eta * losses)
-            agg_weights = agg_weights / np.sum(agg_weights)
+            exp_losses = np.exp(self.eta * (losses - np.max(losses)))
+            agg_weights = exp_losses / np.sum(exp_losses)
             
         else:
             # Uniform fallback

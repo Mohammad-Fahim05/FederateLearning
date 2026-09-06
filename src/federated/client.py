@@ -48,13 +48,17 @@ class HospitalClient:
         )
         
         self.sam_rho = config['federated']['sam_rho']
+        self.fedprox_mu = float(config.get('federated', {}).get('mu', config.get('federated', {}).get('fedprox_mu', 0.01)))
 
-    def train_epoch(self, model, optimizer):
+    def train_epoch(self, model, optimizer, global_model=None):
         model.to(self.device)
         model.train()
         
         total_loss = 0.0
         total_batches = 0
+        
+        method = self.config.get('method', '')
+        is_fedprox = (method == 'FedProx') and (global_model is not None) and (self.fedprox_mu > 0)
         
         for batch_idx, (images, labels, _, _) in enumerate(self.loader):
             images = images.to(self.device, non_blocking=True)
@@ -65,6 +69,19 @@ class HospitalClient:
             loss_val = self.dp_clipper.clip_and_noise_sample_grad(
                 model, self.criterion, images, labels, device=self.device
             )
+            
+            # FedProx proximal regularization: (mu / 2) * sum_i ||theta_i - theta_global_i||^2
+            if is_fedprox:
+                prox_loss = 0.0
+                for (name, param), (_, g_param) in zip(model.named_parameters(), global_model.named_parameters()):
+                    if param.requires_grad:
+                        prox_diff = param - g_param.detach()
+                        if param.grad is not None:
+                            param.grad.data.add_(prox_diff.data, alpha=self.fedprox_mu)
+                        else:
+                            param.grad = (self.fedprox_mu * prox_diff.data).clone()
+                        prox_loss += 0.5 * self.fedprox_mu * torch.sum(prox_diff ** 2).item()
+                loss_val += prox_loss
             
             # Step 2: Apply local SGD step
             optimizer.step()
@@ -92,7 +109,7 @@ class HospitalClient:
         local_loss = 0.0
         epochs = self.config['federated']['local_epochs']
         for epoch in range(epochs):
-            loss = self.train_epoch(local_model, optimizer)
+            loss = self.train_epoch(local_model, optimizer, global_model=global_model)
             local_loss += loss
             
         avg_local_loss = local_loss / max(1, epochs)
