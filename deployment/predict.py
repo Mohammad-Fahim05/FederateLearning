@@ -28,9 +28,16 @@ class Camelyon17Predictor:
         self.model = ResNet18Backbone(num_classes=2, pretrained=False).to(self.device)
         
         if checkpoint_path and os.path.exists(checkpoint_path):
-            print(f"Loading trained model weights from {checkpoint_path}...")
-            state_dict = torch.load(checkpoint_path, map_location=self.device)
-            self.model.load_state_dict(state_dict)
+    print(f"Loading trained model weights from {checkpoint_path}...")
+
+    checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+    if 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+
+    self.model.load_state_dict(state_dict)
         else:
             print("Warning: No checkpoint provided or file not found. Running with initialized model weights.")
             
