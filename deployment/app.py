@@ -57,7 +57,11 @@ def predict_image(image):
 
     result = predictor.predict_patch(image)
 
-    return result
+    return (
+    result["probability_tumor"],
+    result["probability_normal"],
+    result["prediction"]
+)
 
 
 # ---------------------------------------------------------
